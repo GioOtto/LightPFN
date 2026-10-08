@@ -8,7 +8,7 @@
 
 - [ ] Inference tests pass / I test di inferenza passano
 - [ ] Inference paths return the same probabilities up to rounding (if touched) / I percorsi di inferenza restituiscono le stesse probabilità a meno degli arrotondamenti (se modificati)
-- [ ] New dependencies are Apache 2.0 compatible and listed in `licenses/` / Le nuove dipendenze sono compatibili con Apache 2.0 ed elencate in `licenses/`
+- [ ] New dependencies are Apache 2.0 compatible and listed in `docs/THIRD_PARTY_LICENSES.md` / Le nuove dipendenze sono compatibili con Apache 2.0 ed elencate in `docs/THIRD_PARTY_LICENSES.md`
 - [ ] No private data, checkpoints or credentials / Nessun dato privato, checkpoint o credenziale
 - [ ] AI tools used: yes / no / Strumenti AI usati: sì / no
 

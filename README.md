@@ -216,9 +216,8 @@ Version 2 will add:
 | `lightpfn/` | the package: model, scikit-learn wrapper, devices, Vulkan backend (`vulkan/`), and the training code: priors (`prior/`), trainer (`train.py`), evaluation harness (`eval/`) |
 | `tests/` | unit and equivalence tests (CPU; the Vulkan tests also run on a CPU driver) |
 | `examples/` | runnable examples |
-| `docs/en/`, `docs/it/` | user guide, results, Vulkan backend and training, in English and Italian |
+| `docs/` | user guide, results, Vulkan backend and training in English (`en/`) and Italian (`it/`), changelog, third-party licenses |
 | `paper/` | technical report: PDF, LaTeX source, figures and plot data |
-| `licenses/` | licenses of the dependencies |
 
 The published wheel contains only the inference code; training needs a source checkout
 (`pip install -e ".[train,eval]"`).
@@ -227,7 +226,7 @@ The published wheel contains only the inference code; training needs a source ch
 
 Bug reports and focused pull requests are welcome: see [CONTRIBUTING](https://github.com/GioOtto/LightPFN/blob/main/.github/CONTRIBUTING.md). Security
 issues go through [SECURITY](https://github.com/GioOtto/LightPFN/blob/main/.github/SECURITY.md). Changes between versions are in
-[CHANGELOG.md](https://github.com/GioOtto/LightPFN/blob/main/CHANGELOG.md).
+[CHANGELOG](https://github.com/GioOtto/LightPFN/blob/main/docs/CHANGELOG.md).
 
 ## Citation
 
@@ -245,4 +244,4 @@ GitHub's "Cite this repository" button reads [CITATION.cff](https://github.com/G
 ## License
 
 Code and weights: [Apache License 2.0](https://github.com/GioOtto/LightPFN/blob/main/LICENSE), with the attribution notice in [NOTICE](https://github.com/GioOtto/LightPFN/blob/main/NOTICE).
-Dependencies keep their own licenses, listed in [licenses/](https://github.com/GioOtto/LightPFN/tree/main/licenses/).
+Dependencies keep their own licenses, listed in [THIRD_PARTY_LICENSES](https://github.com/GioOtto/LightPFN/blob/main/docs/THIRD_PARTY_LICENSES.md).

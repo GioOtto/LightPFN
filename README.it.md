@@ -218,9 +218,8 @@ La versione 2 aggiungerà:
 | `lightpfn/` | il pacchetto: modello, wrapper scikit-learn, dispositivi, backend Vulkan (`vulkan/`), e il codice di addestramento: prior (`prior/`), trainer (`train.py`), harness di valutazione (`eval/`) |
 | `tests/` | test unitari e di equivalenza (CPU; i test Vulkan girano anche su un driver CPU) |
 | `examples/` | esempi eseguibili |
-| `docs/en/`, `docs/it/` | guida, risultati, backend Vulkan e addestramento, in inglese e in italiano |
+| `docs/` | guida, risultati, backend Vulkan e addestramento in inglese (`en/`) e in italiano (`it/`), changelog, licenze di terze parti |
 | `paper/` | report tecnico: PDF, sorgente LaTeX, figure e dati dei grafici |
-| `licenses/` | licenze delle dipendenze |
 
 Il wheel pubblicato contiene solo il codice di inferenza; per l'addestramento serve il sorgente
 (`pip install -e ".[train,eval]"`).
@@ -229,7 +228,7 @@ Il wheel pubblicato contiene solo il codice di inferenza; per l'addestramento se
 
 Segnalazioni di bug e pull request circoscritte sono benvenute: vedi [CONTRIBUTING](https://github.com/GioOtto/LightPFN/blob/main/.github/CONTRIBUTING.md).
 Le vulnerabilità passano da [SECURITY](https://github.com/GioOtto/LightPFN/blob/main/.github/SECURITY.md). Le modifiche tra versioni sono in
-[CHANGELOG.md](https://github.com/GioOtto/LightPFN/blob/main/CHANGELOG.md).
+[CHANGELOG](https://github.com/GioOtto/LightPFN/blob/main/docs/CHANGELOG.md).
 
 ## Citazione
 
@@ -247,4 +246,4 @@ Il pulsante "Cite this repository" di GitHub legge [CITATION.cff](https://github
 ## Licenza
 
 Codice e pesi: [Apache License 2.0](https://github.com/GioOtto/LightPFN/blob/main/LICENSE), con l'avviso di attribuzione in [NOTICE](https://github.com/GioOtto/LightPFN/blob/main/NOTICE). Le
-dipendenze mantengono le proprie licenze, elencate in [licenses/](https://github.com/GioOtto/LightPFN/tree/main/licenses/).
+dipendenze mantengono le proprie licenze, elencate in [THIRD_PARTY_LICENSES](https://github.com/GioOtto/LightPFN/blob/main/docs/THIRD_PARTY_LICENSES.md).

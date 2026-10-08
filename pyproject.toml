@@ -53,10 +53,7 @@ packages = ["lightpfn"]
 exclude = ["lightpfn/train.py", "lightpfn/prior", "lightpfn/eval", "lightpfn/model/ccmm.py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/lightpfn", "/pyproject.toml", "/LICENSE", "/NOTICE",
-           "/public/README.md", "/public/hatch_build.py", "/hatch_build.py",
+include = ["/lightpfn", "/pyproject.toml", "/LICENSE", "/NOTICE", "/README.md",
            "/tests/test_release.py", "/tests/test_sklearn_api.py", "/tests/test_sklearn_context.py"]
 exclude = ["lightpfn/train.py", "lightpfn/prior", "lightpfn/eval", "lightpfn/model/ccmm.py", "**/__pycache__"]
 
-[tool.hatch.build.targets.sdist.hooks.custom]
-path = "hatch_build.py"

@@ -18,8 +18,8 @@ reasoning and the checks you ran. Small, reviewable changes are merged faster th
 - **Evaluation discipline.** Model or prior changes are judged on held-out synthetic tasks and on real datasets
   outside TabArena; TabArena is kept for final checks. Report paired differences with intervals, not single
   numbers.
-- **Licenses.** New dependencies need a license compatible with Apache 2.0, listed in `licenses/`. Keep the
-  attributions of existing code.
+- **Licenses.** New dependencies need a license compatible with Apache 2.0, listed in `docs/THIRD_PARTY_LICENSES.md`. Keep
+  the attributions of existing code.
 - **Nothing private.** Do not add datasets, checkpoints, logs, credentials or paths from your machine.
 - **AI tools.** Say in the pull request if you used AI tools, and review their output before submitting.
 
@@ -66,7 +66,7 @@ la motivazione e le verifiche eseguite. Le modifiche piccole e facili da riveder
   parte e su dataset reali esterni a TabArena; TabArena resta per le verifiche finali. Riporta differenze
   appaiate con intervalli, non numeri singoli.
 - **Licenze.** Le nuove dipendenze devono avere una licenza compatibile con Apache 2.0 ed essere elencate in
-  `licenses/`. Conserva le attribuzioni del codice esistente.
+  `docs/THIRD_PARTY_LICENSES.md`. Conserva le attribuzioni del codice esistente.
 - **Niente di privato.** Non aggiungere dataset, checkpoint, log, credenziali o percorsi della tua macchina.
 - **Strumenti AI.** Indica nella pull request se hai usato strumenti AI e controllane l'output prima di proporla.
 
