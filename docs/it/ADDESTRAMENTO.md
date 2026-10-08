@@ -130,8 +130,9 @@ primi 7.000 passi, e lo stadio è stato esteso due volte. Il report (Sezione 9) 
 | D4 | 13 dataset OpenML da 50.000 a 2,2 milioni di righe esterni a TabArena e D3 | `python -m lightpfn.eval.large build`, `run --checkpoint CKPT --name NOME`, `report --models NOME catboost` |
 | TabArena | i 38 task di classificazione di TabArena v0.1, protocolli lite e full (il nostro harness, non la pipeline ufficiale) | `python -m lightpfn.eval.data`, poi `python -m lightpfn.eval.harness --checkpoint CKPT --name NOME --n-estimators 4 --mode full` |
 
-La selezione dei modelli ha usato D1, D2 e D3 con confronti bootstrap appaiati; TabArena è stato guardato solo per
-i due finalisti. Le baseline (CatBoost, LightGBM, XGBoost, random forest) passano dallo stesso harness con le
+La selezione dei modelli in questa serie ha usato D1, D2 e D3 con confronti bootstrap appaiati. Dopo aver
+introdotto questo protocollo, TabArena è stato guardato solo per i due finalisti; una valutazione esplorativa
+precedente di r2 è dichiarata nel report, Sezione 7. Le baseline (CatBoost, LightGBM, XGBoost, random forest) passano dallo stesso harness con le
 impostazioni di default: `python -m lightpfn.eval.external run --models catboost lightgbm xgboost rf`.
 
 Usa un `--name` diverso per ogni checkpoint e configurazione degli estimatori. L'harness riprende gli split

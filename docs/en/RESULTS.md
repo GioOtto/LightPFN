@@ -19,7 +19,9 @@ intervals over tasks or datasets. The released model is the long-context checkpo
 
 Design decisions were taken on three sets kept apart from TabArena: D1, 1,536 held-out synthetic tasks; D2,
 mechanism probes (XOR, parity, lookup tables among noise columns); D3, 55 OpenML-CC18 classification datasets
-that are not in TabArena. TabArena was looked at only for the two finalists, after the choice between them.
+that are not in TabArena. For this series, after introducing the selection protocol, TabArena was looked at
+only for the two finalists, after choosing between them. An earlier exploratory r2 evaluation predates this
+protocol and is disclosed in the technical report, Section 7.
 
 ## Small tables: 55 OpenML datasets outside TabArena
 

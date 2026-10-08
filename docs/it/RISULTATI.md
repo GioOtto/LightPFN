@@ -20,8 +20,9 @@ con intervalli bootstrap appaiati al 95% su task o dataset. Il modello rilasciat
 
 Le scelte di progetto sono state prese su tre insiemi tenuti separati da TabArena: D1, 1.536 problemi sintetici
 tenuti da parte; D2, sonde sui meccanismi (XOR, parità, tabelle di lookup tra colonne di rumore); D3, 55 dataset di
-classificazione OpenML-CC18 che non sono in TabArena. TabArena è stato guardato solo per i due finalisti, dopo la
-scelta tra i due.
+classificazione OpenML-CC18 che non sono in TabArena. Per questa serie, dopo aver introdotto il protocollo di
+selezione, TabArena è stato guardato solo per i due finalisti, dopo la scelta tra i due. Una valutazione
+esplorativa precedente di r2 precede questo protocollo ed è dichiarata nel report tecnico, Sezione 7.
 
 ## Tabelle piccole: 55 dataset OpenML esterni a TabArena
 

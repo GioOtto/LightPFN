@@ -129,8 +129,9 @@ extended twice. The report (Section 9) describes the exact sequence.
 | D4 | 13 OpenML datasets of 50,000 to 2.2 million rows outside TabArena and D3 | `python -m lightpfn.eval.large build`, `run --checkpoint CKPT --name NAME`, `report --models NAME catboost` |
 | TabArena | the 38 classification tasks of TabArena v0.1, lite and full protocols (our harness, not the official pipeline) | `python -m lightpfn.eval.data`, then `python -m lightpfn.eval.harness --checkpoint CKPT --name NAME --n-estimators 4 --mode full` |
 
-Model selection used D1, D2 and D3 with paired bootstrap comparisons; TabArena was only looked at for the two
-finalists. Baselines (CatBoost, LightGBM, XGBoost, random forest) run through the same harness with default
+Model selection in this series used D1, D2 and D3 with paired bootstrap comparisons. After introducing this
+protocol, TabArena was looked at only for the two finalists; an earlier exploratory r2 evaluation is disclosed
+in the report, Section 7. Baselines (CatBoost, LightGBM, XGBoost, random forest) run through the same harness with default
 settings: `python -m lightpfn.eval.external run --models catboost lightgbm xgboost rf`.
 
 Use a different `--name` for each checkpoint and estimator configuration. The harness resumes successful
