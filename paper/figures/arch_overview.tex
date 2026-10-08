@@ -1,0 +1,155 @@
+% Architecture of LightPFN (variant B4): input and seven operators, with explicit column refinement.
+% Two rows of four panels, 16.5 cm wide.
+\begin{tikzpicture}[x=1cm, y=1cm]
+\tikzset{eqn/.style={font=\fontsize{7.2}{8.8}\selectfont, align=center, inner sep=1pt}}
+\def\W{3.9}\def\H{5.6}
+\foreach \px/\py/\c in {0/6/cin, 4.2/6/ccell, 8.4/6/ccol, 12.6/6/cref, 0/0/ccol, 4.2/0/crow, 8.4/0/cicl, 12.6/0/cdec}
+  \draw[panel=\c] (\px,\py) rectangle ++(\W,\H);
+\foreach \a in {3.9, 8.1, 12.3} {
+  \draw[bigflow] (\a+0.02,9.5) -- (\a+0.28,9.5);
+  \draw[bigflow] (\a+0.02,3.5) -- (\a+0.28,3.5);
+}
+\draw[bigflow] (14.55,6.0) -- (14.55,5.8) -- (1.95,5.8) -- (1.95,5.62);
+
+% ---------------------------------------------------------------- 1 input
+\begin{scope}[shift={(0,6)}]
+\node[stitle=cin] at (0.12,5.48) {1\quad Input task};
+\fill[black!12] (0.75,3.3) rectangle (2.35,4.7);
+\fill[black!3] (0.75,2.5) rectangle (2.35,3.3);
+\draw[shift={(0.75,2.5)}, step=0.2, black!25, very thin] (0,0) grid (1.6,2.2);
+\draw[black!70, line width=0.45pt] (0.75,2.5) rectangle (2.35,4.7);
+\draw[black!70, dashed, line width=0.45pt] (0.75,3.3) -- (2.35,3.3);
+% Zero-based cell indices; inset markers are centred on the local grid.
+\foreach \col/\row in {1/9, 5/6, 3/1, 7/8} {
+  \begin{scope}[shift={({0.75+(\col+0.5)*0.2},{2.5+(\row+0.5)*0.2})}]
+    \fill[white] (-0.075,-0.075) rectangle (0.075,0.075);
+    \draw[black!55, line width=0.3pt] (-0.075,-0.075) -- (0.075,0.075);
+  \end{scope}
+}
+\fill[black!25] (2.55,3.3) rectangle (2.75,4.7);
+\draw[shift={(2.55,2.5)}, step=0.2, black!35, very thin] (0,0) grid (0.2,2.2);
+\draw[black!70, line width=0.45pt] (2.55,2.5) rectangle (2.75,4.7);
+\node[dim] at (2.65,2.8) {?};
+\node[dim] at (1.55,4.88) {$m$ features};
+\node[dim] at (2.65,4.88) {$y$};
+\draw[decorate, decoration={brace, amplitude=3pt, mirror}, black!60] (0.65,4.7) -- (0.65,3.32) node[midway, left=3pt, dim] {$n_c$};
+\draw[decorate, decoration={brace, amplitude=3pt, mirror}, black!60] (0.65,3.28) -- (0.65,2.5) node[midway, left=3pt, dim] {$n_q$};
+\node[eqn] at (1.95,1.55) {$X\in(\mathbb{R}\cup\{\varnothing\})^{n\times m}$\\[2pt]$y\in\{1,\dots,C\}^{n_c}$};
+\node[dim,align=center] at (1.95,0.45) {$n=n_c+n_q$\\prior/eval: $m\le100$, $C\le10$};
+\end{scope}
+
+% ---------------------------------------------------------------- 2 cell embedding
+\begin{scope}[shift={(4.2,6)}]
+\node[stitle=ccell] at (0.12,5.48) {2\quad Cell embedding};
+\tensor{0.8}{2.55}{1.6}{1.8}{0.9}{ccell}
+\node[dim, below] at (1.6,2.55) {$m$};
+\node[dim, left] at (0.8,3.45) {$n$};
+\node[dim] at (3.1,4.55) {$64$};
+\node[eqn] at (1.95,1.55) {$e_{ij}=\mathrm{LN}\big(W_f\,\phi_{ij}+W_m\,\psi_{ij}\big)$\\[2pt]
+  {\tiny $z$: soft-clipped z-score}\\{\tiny $\psi$: rank, missingness, neighbours}};
+\node[dim] at (1.95,0.4) {$E\in\mathbb{R}^{n\times m\times 64}$};
+\end{scope}
+
+% ---------------------------------------------------------------- 3 column attention
+\begin{scope}[shift={(8.4,6)}]
+\node[stitle=ccol] at (0.12,5.48) {3\quad Column encoding};
+\tensor{0.45}{2.55}{1.6}{1.8}{0.9}{ccol}
+\fill[ccol!70, opacity=0.8] (1.05,2.55) rectangle (1.25,4.35);
+\fill[ccol!80, opacity=0.8] (1.05,4.35) -- (1.59,4.755) -- (1.79,4.755) -- (1.25,4.35) -- cycle;
+\node[dim, below] at (1.15,2.55) {$E_{:,j}$};
+\matrixbox{3.0}{3.5}{0.55}{0.55}{ccol}
+\node[dim, above] at (3.27,4.05) {$I_\ell$};
+\node[dim, below] at (3.27,3.5) {$64\times 64$};
+\draw[{Stealth[length=1.2mm]}-{Stealth[length=1.2mm]}, ccol!80!black, line width=0.5pt] (2.65,3.77) -- (2.97,3.77);
+\node[eqn] at (1.95,1.55) {$H_\ell=\mathrm{Block}\big(I_\ell,E^{\mathrm{ctx}}_{:,j}\big)$\\[2pt]$E_{:,j}\leftarrow\mathrm{Block}\big(E_{:,j},H_\ell\big)$};
+\node[dim] at (1.95,0.4) {$\ell=1,2$;\ \ cost $O(nmk)$, $k=64$};
+\end{scope}
+
+% ---------------------------------------------------------------- 4 row refinement
+\begin{scope}[shift={(12.6,6)}]
+\node[stitle=cref] at (0.12,5.48) {4\quad Row refinement};
+\tensor{0.35}{2.55}{1.6}{1.8}{0.9}{cref}
+\fill[cref!70, opacity=0.8] (0.35,3.45) rectangle (1.95,3.65);
+\fill[cref!80, opacity=0.8] (1.95,3.45) -- (2.49,3.855) -- (2.49,4.055) -- (1.95,3.65) -- cycle;
+\node[dim, left] at (0.35,3.55) {$c$};
+\matrixbox{3.0}{3.45}{0.55}{0.32}{cref}
+\node[dim, above] at (3.27,3.77) {$S$};
+\node[dim, below] at (3.27,3.45) {$4\times 64$};
+\draw[{Stealth[length=1.2mm]}-{Stealth[length=1.2mm]}, cref!80!black, line width=0.5pt] (2.6,3.7) -- (2.97,3.62);
+\node[eqn] at (1.95,1.55) {$c\leftarrow\mathrm{Block}^{Q\rho}_{t}(c,S)$\\[2pt]$S\leftarrow\mathrm{Block}^{K\rho}_{t}(S,c)$};
+\node[dim] at (1.95,0.4) {3 rounds + final broadcast; retain cells};
+\end{scope}
+
+% ---------------------------------------------------------------- 5 column refinement
+\begin{scope}[shift={(0,0)}]
+\node[stitle=ccol] at (0.12,5.48) {5\quad Column refinement};
+\tensor{0.45}{2.55}{1.6}{1.8}{0.9}{ccol}
+\fill[ccol!70, opacity=0.8] (1.05,2.55) rectangle (1.25,4.35);
+\fill[ccol!80, opacity=0.8] (1.05,4.35) -- (1.59,4.755) -- (1.79,4.755) -- (1.25,4.35) -- cycle;
+\node[dim, below] at (1.15,2.55) {$\bar E_{:,j}$};
+\matrixbox{3.0}{3.5}{0.55}{0.55}{ccol}
+\node[dim, above] at (3.27,4.05) {$\bar I_\ell$};
+\node[dim, below] at (3.27,3.5) {$64\times 64$};
+\draw[{Stealth[length=1.2mm]}-{Stealth[length=1.2mm]}, ccol!80!black, line width=0.5pt] (2.65,3.77) -- (2.97,3.77);
+\node[eqn] at (1.95,1.55) {$\bar H_\ell=\overline{\mathrm{Block}}\big(\bar I_\ell,\bar E^{\mathrm{ctx}}_{:,j}\big)$\\[2pt]$E^\star_{:,j}=\overline{\mathrm{Block}}\big(\bar E_{:,j},\bar H_\ell\big)$};
+\node[dim] at (1.95,0.4) {2 layers, $k=64$; independent parameters};
+\end{scope}
+
+% ---------------------------------------------------------------- 6 row compression
+\begin{scope}[shift={(4.2,0)}]
+\node[stitle=crow] at (0.12,5.48) {6\quad Row compression};
+\tensor{0.3}{3.95}{1.5}{0.22}{0.9}{crow}
+\node[dim, below] at (1.05,3.95) {row $i$: $c^\star\in\mathbb{R}^{m\times 64}$};
+\matrixbox{2.75}{2.5}{0.8}{2.2}{crow}
+\fill[crow!55] (2.75,3.55) rectangle (3.55,3.7);
+\draw[crow!75!black, line width=0.45pt] (2.75,3.55) rectangle (3.55,3.7);
+\node[dim, below] at (3.15,2.5) {$R\in\mathbb{R}^{n\times 256}$};
+\node[dim, right] at (3.55,3.62) {$r_i$};
+\draw[flow] (2.3,3.95) to[out=-40, in=180] (2.73,3.62);
+\node[eqn] at (1.95,1.5) {$s^{(l)}=\mathrm{Block}^{K_c\rho}_l\big(s^{(l-1)},$\\$[\,s^{(l-1)};c^\star\,]\big)$\\[2pt]$r_i=\mathrm{vec}\big(s^{(3)}\big)\in\mathbb{R}^{256}$};
+\node[dim] at (1.95,0.4) {4 separate readout tokens, 3 blocks};
+\end{scope}
+
+% ---------------------------------------------------------------- 7 ICL
+\begin{scope}[shift={(8.4,0)}]
+\node[stitle=cicl] at (0.12,5.48) {7\quad In-context learning};
+\fill[black!18] (0.45,4.4) rectangle (1.45,4.75);
+\fill[cicl!30] (0.45,3.3) rectangle (1.45,4.4);
+\draw[black!70, line width=0.45pt] (0.45,3.3) rectangle (1.45,4.75);
+\draw[black!70, line width=0.3pt] (0.45,4.4) -- (1.45,4.4);
+\matrixbox{0.45}{2.55}{1.0}{0.55}{cin}
+\node[dim, left] at (0.45,4.57) {$T$};
+\node[dim, left] at (0.45,3.85) {$Z$};
+\node[dim, left] at (0.45,2.82) {$U$};
+\node[dim] at (0.95,2.37) {width 256};
+\foreach \i in {0,1,2} {
+  \foreach \j in {0,1} \filldraw[fill=cicl!55, draw=black!45, line width=0.3pt] (2.3+\j*0.36,4.3-\i*0.36) rectangle ++(0.36,0.36);
+  \filldraw[fill=white, draw=black!45, line width=0.3pt] (3.02,4.3-\i*0.36) rectangle ++(0.36,0.36);
+}
+\foreach \j/\t in {0/$T$, 1/ctx, 2/qry} \node[dim] at (2.48+\j*0.36,4.8) {\t};
+\foreach \i/\t in {0/$T$, 1/ctx, 2/qry} \node[dim, anchor=east] at (2.3,4.48-\i*0.36) {\t};
+\node[dim] at (2.84,3.4) {mask (query $\times$ key)};
+\node[eqn] at (1.95,1.55) {$Z^{(l)}=\mathrm{Block}_l\big(Z^{(l-1)},Z^{(l-1)}\big)$\\[2pt]$U^{(l)}=\mathrm{Block}^{\mathrm{MQA}}_l\big(U^{(l-1)},Z^{(l-1)}\big)$};
+\node[dim] at (1.95,0.4) {$l=1,\dots,7$;\ \ 16 thinking rows $T$};
+\end{scope}
+
+% ---------------------------------------------------------------- 8 decoder
+\begin{scope}[shift={(12.6,0)}]
+\node[stitle=cdec] at (0.12,5.48) {8\quad Retrieval decoder};
+\matrixbox{0.3}{3.55}{1.2}{0.7}{cdec}
+\node[dim] at (0.9,3.9) {$A$};
+\node[font=\scriptsize] at (1.68,3.9) {$\cdot$};
+\matrixbox{1.85}{3.3}{0.4}{1.2}{cin}
+\foreach \r/\c in {0/0, 1/2, 2/1, 3/0, 4/2, 5/1} \fill[black!60] ({1.85+\c*0.1333},{4.5-(\r+1)*0.2}) rectangle ++(0.1333,0.2);
+\draw[black!70, line width=0.45pt] (1.85,3.3) rectangle (2.25,4.5);
+\node[font=\scriptsize] at (2.48,3.9) {$=$};
+\matrixbox{2.7}{3.55}{0.4}{0.7}{cdec}
+\node[dim] at (2.9,3.9) {$P$};
+\node[dim, below] at (0.9,3.55) {$n_q\times n_c$};
+\node[dim, below] at (2.05,3.3) {$Y$ one-hot};
+\node[dim, below] at (2.9,3.55) {$n_q\times C$};
+\node[eqn] at (1.95,1.55) {$A=\frac{1}{H}\sum_h\mathrm{softmax}\big(\widehat Q_hK_h^\top/\sqrt{d_h}\big)$\\[2pt]$p^{\mathrm{vote}}=AY$,\quad $P=\mathrm{softmax}_c(\log\widetilde p)$};
+\node[dim] at (1.95,0.4) {$H=4$; smooth votes, then normalize};
+\end{scope}
+
+\end{tikzpicture}

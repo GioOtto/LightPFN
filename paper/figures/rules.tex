@@ -1,0 +1,42 @@
+% Rule prior: interaction-only constructions (binary XOR and a Latin square for C = 3).
+\begin{tikzpicture}[x=1cm, y=1cm]
+\draw[panel=cdata] (0,0) rectangle (8.0,4.9);
+\draw[panel=cdata] (8.3,0) rectangle (16.3,4.9);
+
+% binary XOR: 2 x 2 table of the balanced factorial cells with conditional probabilities
+\node[stitle=cdata] at (0.12,4.78) {Binary XOR on two drivers};
+\def\ox{1.9}\def\oy{1.7}\def\cw{1.5}\def\ch{0.85}
+\foreach \i/\j/\v in {0/0/0, 1/0/1, 0/1/1, 1/1/0} {
+  \ifnum\v=0 \def\col{orange!25}\else \def\col{blue!16}\fi
+  \filldraw[fill=\col, draw=black!50, line width=0.4pt] (\ox+\i*\cw,\oy+\j*\ch) rectangle ++(\cw,\ch);
+  \node[font=\scriptsize, align=center] at (\ox+\i*\cw+0.5*\cw,\oy+\j*\ch+0.5*\ch) {$y=\v$\\[-1pt]{\tiny $p=\tfrac14$}};
+}
+\node[dim] at (\ox+0.5*\cw,\oy+2*\ch+0.2) {$x_{d_1}\le\tau_1$};
+\node[dim] at (\ox+1.5*\cw,\oy+2*\ch+0.2) {$x_{d_1}>\tau_1$};
+\node[dim, anchor=east] at (\ox-0.08,\oy+1.5*\ch) {$x_{d_2}>\tau_2$};
+\node[dim, anchor=east] at (\ox-0.08,\oy+0.5*\ch) {$x_{d_2}\le\tau_2$};
+\node[dim] at (\ox+2*\cw+0.75,\oy+2*\ch+0.2) {$P(y{=}1\mid x_{d_2})$};
+\foreach \j in {0,1} \node[dim] at (\ox+2*\cw+0.75,\oy+\j*\ch+0.5*\ch) {$\tfrac12$};
+\node[dim, anchor=east] at (\ox-0.08,\oy-0.25) {$P(y{=}1\mid x_{d_1})$};
+\foreach \i in {0,1} \node[dim] at (\ox+\i*\cw+0.5*\cw,\oy-0.25) {$\tfrac12$};
+\node[font=\scriptsize, align=center] at (4.0,0.6)
+  {$y=\mathbf{1}[x_{d_1}>\tau_1]\oplus\mathbf{1}[x_{d_2}>\tau_2]$\\[2pt]
+   $I(y;x_{d_k})=0,\qquad I(y;x_{d_1},x_{d_2})=1$ bit};
+
+% Latin square for C = 3
+\node[stitle=cdata] at (8.42,4.78) {Multiclass: Latin square, $C=3$};
+\def\lx{10.4}\def\ly{1.55}\def\s{0.75}
+\foreach \a in {0,1,2} \foreach \b in {0,1,2} {
+  \pgfmathtruncatemacro{\c}{mod(\a+\b,3)}
+  \ifcase\c \def\col{orange!25}\or \def\col{blue!16}\or \def\col{green!22}\fi
+  \filldraw[fill=\col, draw=black!50, line width=0.4pt] (\lx+\a*\s,\ly+\b*\s) rectangle ++(\s,\s);
+  \node[font=\scriptsize] at (\lx+\a*\s+0.5*\s,\ly+\b*\s+0.5*\s) {$\c$};
+}
+\foreach \a in {0,1,2} {
+  \node[dim] at (\lx+\a*\s+0.5*\s,\ly+3*\s+0.18) {$s_1{=}\a$};
+  \node[dim, anchor=east] at (\lx-0.05,\ly+\a*\s+0.5*\s) {$s_2{=}\a$};
+}
+\node[dim, anchor=west, align=left] at (12.85,2.7) {each row and column\\contains every class once};
+\node[font=\scriptsize, align=center] at (12.3,0.6)
+  {$y=(s_1+s_2)\bmod C$\\[2pt]$I(y;s_k)=0,\qquad I(y;s_1,s_2)=\log_2 C$};
+\end{tikzpicture}

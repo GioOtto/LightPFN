@@ -1,0 +1,38 @@
+% D2 probes: AUC against the total number of features d (mean of five seeds, bars from the lowest
+% to the highest seed). Data: plotdata/probe_*.dat from make_data.py.
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=2 by 1, horizontal sep=1.3cm},
+  width=7.1cm, height=5.2cm,
+  xmode=log, log basis x=10, minor xtick={},
+  ymin=0.44, ymax=1.03, ytick={0.5,0.6,0.7,0.8,0.9,1.0},
+  xlabel={features $d$ (informative and noise)},
+  grid=major, grid style={black!12},
+  tick label style={font=\scriptsize}, label style={font=\scriptsize}, title style={font=\small},
+  every axis plot/.append style={line width=0.8pt, mark size=1.6pt},
+  error bars/error bar style={line width=0.5pt},
+  error bars/error mark options={rotate=90, mark size=1.5pt, line width=0.5pt},
+  cycle list={
+    {black!45, mark=o},
+    {ccell, mark=square},
+    {cref, mark=triangle},
+    {ccol, mark=diamond},
+    {crow, mark=*, line width=1.3pt},
+    {cdec, mark=pentagon*, line width=1.3pt},
+    {cdata, mark=star, line width=1.3pt, mark size=2.2pt}},
+]
+\nextgroupplot[title={XOR of two features}, ylabel={AUC},
+  xtick={2,10,30,50,100}, xticklabels={2,10,30,50,100},
+  legend style={font=\scriptsize, draw=black!30, legend columns=4, column sep=6pt,
+                at={(1.09,-0.36)}, anchor=north}]
+\draw[black!50, dashed, line width=0.5pt] (axis cs:1.8,0.5) -- (axis cs:115,0.5);
+\pgfplotsinvokeforeach{A0,B4,A2,C1,C2,F30,F120}{
+  \addplot+[error bars/.cd, y dir=both, y explicit] table[x=d, y=#1, y error plus=#1_hi, y error minus=#1_lo] {plotdata/probe_xor2.dat};}
+\legend{A0, B4, A2, C1, C2 (final recipe), F30 (final run{,} 30k steps), F120 (120k steps)}
+\nextgroupplot[title={parity of three features},
+  xtick={3,10,30,100}, xticklabels={3,10,30,100}]
+\draw[black!50, dashed, line width=0.5pt] (axis cs:2.7,0.5) -- (axis cs:115,0.5);
+\pgfplotsinvokeforeach{A0,B4,A2,C1,C2,F30,F120}{
+  \addplot+[error bars/.cd, y dir=both, y explicit] table[x=d, y=#1, y error plus=#1_hi, y error minus=#1_lo] {plotdata/probe_parity3.dat};}
+\end{groupplot}
+\end{tikzpicture}

@@ -1,0 +1,36 @@
+% Colors and TikZ styles shared by the report figures.
+\colorlet{cin}{black!60}
+\colorlet{ccell}{blue!70!black}
+\colorlet{ccol}{green!50!black}
+\colorlet{cref}{orange!85!black}
+\colorlet{crow}{red!65!black}
+\colorlet{cicl}{yellow!55!orange}
+\colorlet{cdec}{violet!75!black}
+\colorlet{cdata}{teal!70!black}
+\colorlet{cgpu}{green!45!black}
+\tikzset{
+  panel/.style={draw=#1!45, fill=#1!5, rounded corners=4pt, line width=0.6pt},
+  ptitle/.style={font=\bfseries\scriptsize, anchor=north west, text=#1!85!black, inner sep=0pt},
+  psub/.style={font=\tiny, anchor=north west, text=black!60, align=left, inner sep=0pt},
+  sbox/.style={draw=#1!60, fill=#1!13, rounded corners=2pt, font=\tiny, align=center,
+               inner sep=2pt, line width=0.4pt},
+  tok/.style={draw=black!45, fill=#1, minimum size=0.21cm, inner sep=0pt, line width=0.3pt},
+  flow/.style={-{Stealth[length=1.5mm]}, line width=0.5pt, black!70},
+  bigflow/.style={-{Stealth[length=2.6mm,width=2.2mm]}, line width=1.1pt, black!70},
+  shapelabel/.style={font=\tiny, text=black!80, align=center},
+  note/.style={font=\tiny, text=black!65, align=center},
+  plus/.style={circle, draw=black!60, fill=white, inner sep=0pt, minimum size=0.26cm, font=\tiny},
+  eq/.style={font=\scriptsize, align=center, text width=3.65cm},
+  dim/.style={font=\tiny, text=black!75, inner sep=1pt},
+  stitle/.style={font=\bfseries\footnotesize, anchor=north west, text=#1!85!black, inner sep=0pt},
+}
+% \tensor{x}{y}{w}{h}{d}{color}: an n x m x d block, front face w x h, depth d drawn obliquely
+\newcommand{\tensor}[6]{%
+  \filldraw[fill=#6!14, draw=#6!75!black, line width=0.45pt] (#1,#2) rectangle ({#1+#3},{#2+#4});
+  \filldraw[fill=#6!28, draw=#6!75!black, line width=0.45pt] (#1,{#2+#4}) -- ({#1+0.6*#5},{#2+#4+0.45*#5})
+    -- ({#1+#3+0.6*#5},{#2+#4+0.45*#5}) -- ({#1+#3},{#2+#4}) -- cycle;
+  \filldraw[fill=#6!40, draw=#6!75!black, line width=0.45pt] ({#1+#3},#2) -- ({#1+#3+0.6*#5},{#2+0.45*#5})
+    -- ({#1+#3+0.6*#5},{#2+#4+0.45*#5}) -- ({#1+#3},{#2+#4}) -- cycle;}
+% \matrixbox{x}{y}{w}{h}{color}: a plain matrix
+\newcommand{\matrixbox}[5]{%
+  \filldraw[fill=#5!14, draw=#5!75!black, line width=0.45pt] (#1,#2) rectangle ({#1+#3},{#2+#4});}

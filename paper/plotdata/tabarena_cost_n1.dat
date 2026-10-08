@@ -1,0 +1,4 @@
+time,rank,label,anchor
+4.5881,3.3684,CPU,south west
+2.9544,3.3684,CPU fast,south east
+0.0687,3.3684,GPU fast,south

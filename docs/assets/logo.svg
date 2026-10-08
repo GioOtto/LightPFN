@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="LightPFN logo: a small table with one highlighted cell">
+  <rect width="128" height="128" rx="26" fill="#14171c"/>
+  <g fill="#3b424d">
+    <rect x="22" y="24" width="24" height="16" rx="4"/>
+    <rect x="52" y="24" width="24" height="16" rx="4"/>
+    <rect x="82" y="24" width="24" height="16" rx="4"/>
+    <rect x="22" y="46" width="24" height="16" rx="4"/>
+    <rect x="52" y="46" width="24" height="16" rx="4"/>
+    <rect x="82" y="46" width="24" height="16" rx="4"/>
+    <rect x="22" y="68" width="24" height="16" rx="4"/>
+    <rect x="52" y="68" width="24" height="16" rx="4"/>
+    <rect x="22" y="90" width="24" height="16" rx="4"/>
+    <rect x="52" y="90" width="24" height="16" rx="4"/>
+    <rect x="82" y="90" width="24" height="16" rx="4"/>
+  </g>
+  <rect x="82" y="68" width="24" height="16" rx="4" fill="#f28c28"/>
+  <path d="M30 76 Q 56 58 82 76" fill="none" stroke="#f28c28" stroke-width="3" stroke-linecap="round" stroke-dasharray="1 6"/>
+</svg>

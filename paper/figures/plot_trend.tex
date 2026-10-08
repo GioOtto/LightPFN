@@ -1,0 +1,24 @@
+% EMA checkpoints at 2k, 4k, 6k and 8k steps: D1 mean, D1 rule family and D3 mean AUC.
+% Data: plotdata/trend.dat from make_data.py.
+\begin{tikzpicture}
+\begin{groupplot}[
+  group style={group size=3 by 1, horizontal sep=1.25cm},
+  width=5.4cm, height=4.6cm,
+  xtick={2000,4000,6000,8000}, xticklabels={2k,4k,6k,8k}, xmin=1600, xmax=8400,
+  xlabel={training step},
+  grid=major, grid style={black!12},
+  tick label style={font=\scriptsize}, label style={font=\scriptsize}, title style={font=\small},
+  yticklabel style={/pgf/number format/.cd, fixed, precision=2},
+  every axis plot/.append style={line width=0.8pt, mark size=1.6pt},
+  legend style={font=\scriptsize, draw=black!30, at={(0.97,0.03)}, anchor=south east, row sep=-1pt},
+  cycle list={{black!45, mark=o}, {ccell, mark=square}, {cref, mark=triangle}},
+]
+\nextgroupplot[title={D1, mean of four families}, ylabel={AUC}]
+\pgfplotsinvokeforeach{A0,B4,A2}{\addplot table[x=step, y=#1_d1] {plotdata/trend.dat};}
+\legend{A0, B4, A2}
+\nextgroupplot[title={D1, rule family}]
+\pgfplotsinvokeforeach{A0,B4,A2}{\addplot table[x=step, y=#1_rule] {plotdata/trend.dat};}
+\nextgroupplot[title={D3, 55 real datasets}]
+\pgfplotsinvokeforeach{A0,B4,A2}{\addplot table[x=step, y=#1_d3] {plotdata/trend.dat};}
+\end{groupplot}
+\end{tikzpicture}

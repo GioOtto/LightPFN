@@ -1,0 +1,28 @@
+% TabArena, full protocol: mean rank among the seven configurations against the median over tasks of fit + predict seconds
+% per split (log scale). LightPFN appears three times per estimator count, with the same predictions and rank:
+% initial CPU evaluation, CPU rerun with the fast inference paths, GPU rerun. Data: plotdata/tabarena_cost_*.dat from
+% make_data.py.
+\begin{tikzpicture}
+\begin{axis}[
+  width=11.5cm, height=6.6cm,
+  xmode=log, xmin=0.03, xmax=60, ymin=1, ymax=6.5, y dir=reverse,
+  xtick={0.1,1,10}, xticklabels={0.1,1,10},
+  ytick={1,2,3,4,5,6},
+  xlabel={median fit $+$ predict seconds per split}, ylabel={mean rank (lower is better)},
+  grid=major, grid style={black!12},
+  tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  nodes near coords, point meta=explicit symbolic,
+  visualization depends on={value \thisrow{anchor} \as \lanchor},
+  every node near coord/.append style={font=\tiny, anchor=\lanchor, inner sep=2pt},
+  legend style={font=\scriptsize, draw=black!30, at={(0.98,0.03)}, anchor=south east},
+  legend cell align=left,
+]
+\addplot[only marks, mark=square*, mark size=1.8pt, black!55]
+  table[col sep=comma, x=time, y=rank, meta=label] {plotdata/tabarena_cost_base.dat};
+\addplot[crow, mark=*, mark size=1.8pt, line width=0.8pt, densely dashed]
+  table[col sep=comma, x=time, y=rank, meta=label] {plotdata/tabarena_cost_n4.dat};
+\addplot[cdata, mark=triangle*, mark size=2.2pt, line width=0.8pt, densely dashed]
+  table[col sep=comma, x=time, y=rank, meta=label] {plotdata/tabarena_cost_n1.dat};
+\legend{default trees{,} TabICLv2, LightPFN{,} 4 estimators, LightPFN{,} 1 estimator}
+\end{axis}
+\end{tikzpicture}

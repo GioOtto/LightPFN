@@ -1,0 +1,18 @@
+% Selection protocol: three selection sets, paired statistics, TabArena kept for the final model.
+\begin{tikzpicture}[x=1cm, y=1cm]
+\node[sbox=cdata, text width=3.3cm, minimum height=1.25cm] (d1) at (1.85,3.3)
+  {\textbf{D1}, held-out synthetic\\4 families $\times$ 384 tasks\\graph v3, graph v4, tree, rule};
+\node[sbox=cref, text width=3.3cm, minimum height=1.25cm] (d2) at (1.85,1.85)
+  {\textbf{D2}, mechanism probes\\25 configurations $\times$ 5 seeds\\XOR, parity, lookup, decoys};
+\node[sbox=ccell, text width=3.3cm, minimum height=1.25cm] (d3) at (1.85,0.4)
+  {\textbf{D3}, real datasets\\55 OpenML-CC18 tasks\\absent from TabArena};
+\node[sbox=cin, text width=3.4cm, minimum height=1.6cm] (st) at (6.7,1.85)
+  {paired bootstrap over tasks\\$B=20{,}000$, 95\% intervals\\Benjamini-Hochberg per domain\\hardware anchor A0r vs A0};
+\foreach \n in {d1,d2,d3} \draw[flow] (\n.east) -- (st.west);
+\node[sbox=cgpu, text width=2.4cm, minimum height=1.1cm] (sel) at (10.75,1.85) {selected recipe\\architecture and prior mix};
+\draw[flow] (st) -- (sel);
+\node[draw=black!45, dashed, rounded corners=3pt, fill=white, font=\tiny, align=center,
+      text width=2.4cm, minimum height=1.1cm, inner sep=3pt] (ta) at (14.25,1.85)
+  {\textbf{TabArena}\\final model only, never used for selection};
+\draw[flow, dashed] (sel) -- (ta);
+\end{tikzpicture}

@@ -1,0 +1,22 @@
+% TabArena, full protocol, 38 classification tasks: AUC difference to default CatBoost per task (points), LightPFN
+% with four estimators (bars, sorted) and TabICLv2 (marks). Data: plotdata/tabarena_tasks.dat from make_data.py.
+\begin{tikzpicture}
+\begin{axis}[
+  width=\linewidth, height=7.4cm,
+  xmin=-0.8, xmax=37.8, ymin=-5, ymax=4.2,
+  xtick={0,...,37}, xticklabels from table={plotdata/tabarena_tasks.dat}{label},
+  x tick label style={rotate=90, anchor=east, font=\tiny, inner sep=1pt},
+  ytick={-5,-4,-3,-2,-1,0,1,2,3,4}, ylabel={AUC $-$ default CatBoost (points)},
+  tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  ymajorgrids, grid style={black!12}, major x tick style={draw=none},
+  legend style={font=\scriptsize, draw=black!30, at={(0.02,0.97)}, anchor=north west},
+  legend cell align=left,
+]
+\draw[black!55, line width=0.5pt] (axis cs:-0.8,0) -- (axis cs:37.8,0);
+\addplot[ybar, bar width=4.2pt, fill=crow!65, draw=crow!90!black, area legend]
+  table[x=i, y=lpfn] {plotdata/tabarena_tasks.dat};
+\addplot[only marks, mark=diamond*, mark size=1.7pt, cicl!80!black]
+  table[x=i, y=tabicl] {plotdata/tabarena_tasks.dat};
+\legend{LightPFN LC39k{,} 4 estimators, TabICLv2 (28M{,} GPU)}
+\end{axis}
+\end{tikzpicture}

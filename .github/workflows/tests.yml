@@ -1,0 +1,60 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+env:
+  OMP_NUM_THREADS: "4"
+jobs:
+  inference:
+    name: inference (${{ matrix.os }}, Python ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install ".[dev]"
+      - run: >-
+          python -m pytest -q tests/test_release.py tests/test_sklearn_api.py tests/test_sklearn_context.py
+          tests/test_inference_paths.py tests/test_model.py tests/test_model_variants.py tests/test_model_checkpoint.py
+          tests/test_cat_adapter.py
+      - run: python -m build
+
+  vulkan:
+    name: vulkan (llvmpipe)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install ".[dev,vulkan]"
+      - run: python -c "from lightpfn import vulkan; assert vulkan.is_available(), 'llvmpipe Vulkan adapter unavailable'"
+        env:
+          LIGHTPFN_VULKAN_ADAPTER: llvmpipe
+      - run: python -m pytest -q tests/test_vulkan.py
+        env:
+          LIGHTPFN_VULKAN_ADAPTER: llvmpipe
+
+  training:
+    name: priors and training
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m pip install ".[dev,train,eval]"
+      - run: python -m pytest -q tests/test_prior.py tests/test_data_path.py tests/test_stream.py tests/test_model_train_patch.py

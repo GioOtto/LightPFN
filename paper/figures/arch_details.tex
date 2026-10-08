@@ -1,0 +1,115 @@
+% Architecture of LightPFN (variant B4), details: cell embedding, column ISAB and row refinement on
+% the first row, ICL block and decoder on the second. Portrait, about 13.7 cm wide before scaling.
+\begin{tikzpicture}[x=1cm, y=1cm]
+\def\db{0}\def\dt{6.6}
+\draw[panel=ccell] (0,\db)     rectangle (4.5,\dt);
+\draw[panel=ccol]  (4.75,\db)  rectangle (9.1,\dt);
+\draw[panel=cref]  (9.35,\db)  rectangle (13.7,\dt);
+
+% cell embedding detail
+\node[ptitle=ccell] at (0.12,6.48) {Cell embedding (detail)};
+\foreach \x/\t in {0.9/{$x_{i,j}$}, 2.25/{$x_{i,j+1}$}, 3.6/{$x_{i,j+3}$}} {
+  \node[font=\tiny] at (\x,5.9) {\t};
+  \draw[flow] (\x,5.75) -- (\x,5.42);
+}
+\node[sbox=ccell, text width=3.85cm] at (2.25,5.05)
+  {$z=5\tanh\!\big(\tfrac{x-\mu_j}{5(\sigma_j+\epsilon)}\big)$\\$r$: ECDF mid-rank,\ \ $\nu$: missing flag};
+\draw[flow] (1.15,4.66) -- (1.15,4.32);
+\draw[flow] (3.35,4.66) -- (3.35,4.32);
+\node[sbox=ccell, text width=1.75cm] (fo) at (1.12,3.85)
+  {Fourier map\\$\sum_o\big[\sin z_o\omega_o,$\\$\cos z_o\omega_o\big]$, then $W_f$};
+\node[sbox=ccell, text width=1.9cm] (me) at (3.32,3.85)
+  {meta features $\psi\in\mathbb{R}^{30}$\\$z_o,\nu_o$, rank features\\then $W_m$};
+\node[plus] (p1) at (2.25,2.75) {$+$};
+\draw[flow] (fo.south) -- (p1);
+\draw[flow] (me.south) -- (p1);
+\draw[flow] (p1) -- (2.25,2.38);
+\node[sbox=ccell, minimum width=1.5cm] at (2.25,2.17) {LayerNorm};
+\draw[flow] (2.25,1.96) -- (2.25,1.62);
+\matrixbox{1.45}{1.38}{1.6}{0.18}{ccell}
+\draw[step=0.1, ccell!40, very thin] (1.45,1.38) grid (3.05,1.56);
+\draw[ccell!75!black, line width=0.45pt] (1.45,1.38) rectangle (3.05,1.56);
+\node[shapelabel] at (2.25,1.05) {$e_{ij}\in\mathbb{R}^{64}$};
+\node[note] at (2.25,0.45) {offsets $o\in\{0,1,3\}$\\rank frequencies $k=0,\dots,3$};
+
+% column ISAB detail
+\node[ptitle=ccol] at (4.87,6.48) {Column ISAB (detail)};
+\node[sbox=ccol, text width=1.75cm] (ctx) at (5.9,5.55) {context cells\\$E^{\mathrm{ctx}}_{:,j}+u_{y}$};
+\node[sbox=ccol, text width=1.75cm] (ind) at (8.0,5.55) {inducing points\\$I_\ell$, 64 tokens};
+\node[sbox=ccol, text width=1.75cm] (H) at (8.0,4.3) {$H_\ell=$\\$\mathrm{Block}(I_\ell,E^{\mathrm{ctx}})$};
+\draw[flow] (ind) -- (H);
+\draw[flow] (ctx.east) to[out=0, in=150] (H.north west);
+\node[sbox=ccol, text width=1.75cm] (C2) at (5.9,3.1) {$E^{\mathrm{ctx}}\leftarrow$\\$\mathrm{Block}(E^{\mathrm{ctx}},H_\ell)$};
+\draw[flow] (H.west) to[out=180, in=90] (C2.north);
+\node[sbox=ccol, text width=1.75cm] (qc) at (5.9,1.85) {query cells\\$E^{q}_{:,j}$};
+\node[sbox=ccol, text width=1.75cm] (Q2) at (8.0,1.85) {$E^{q}\leftarrow$\\$\mathrm{Block}(E^{q},H_\ell)$};
+\draw[flow] (qc) -- (Q2);
+\draw[flow, dashed] (H.south) -- node[right, font=\tiny, text=black!60] {cached} (Q2.north);
+\node[note, text width=4.0cm] at (6.92,0.6) {$\ell=1,2$; the states $H_\ell$ are computed once\\at fit time; cost $O(nmk)$};
+
+% row refinement detail
+\node[ptitle=cref] at (9.47,6.48) {Row refinement (detail)};
+\matrixbox{10.97}{5.47}{1.04}{0.26}{cref}
+\foreach \x in {11.23,11.49,11.75} \draw[cref!60, line width=0.3pt] (\x,5.47) -- (\x,5.73);
+\node[font=\tiny, anchor=west] at (12.05,5.6) {$S\in\mathbb{R}^{4\times 64}$};
+\matrixbox{10.07}{2.47}{2.36}{0.26}{ccell}
+\foreach \x in {10.33,10.59,10.85,11.11,11.37,11.63,11.89,12.15} \draw[ccell!50, line width=0.3pt] (\x,2.47) -- (\x,2.73);
+\node[font=\tiny, anchor=north] at (11.25,2.43) {$c\in\mathbb{R}^{m\times 64}$, one row};
+\node[sbox=cref, text width=1.75cm] (ga) at (10.45,4.1) {gather, $t=0,1,2$\\$S\leftarrow\mathrm{Block}^{K\rho}_t(S,c)$};
+\node[sbox=ccell, text width=1.75cm] (bc) at (12.6,4.1) {broadcast, $t=0..3$\\$c\leftarrow\mathrm{Block}^{Q\rho}_t(c,S)$};
+\draw[flow, cref] (10.45,2.75) -- (ga.south);
+\draw[flow, cref] (ga.north) -- (11.1,5.47);
+\draw[flow, ccell] (11.88,5.47) -- (bc.north);
+\draw[flow, ccell] (bc.south) -- (12.3,2.75);
+\node[note, text width=4.1cm] at (11.52,1.55) {RoPE after projection:\\cell Q: broadcast; cell K: gather\\values and residuals unrotated};
+\draw[flow] (11.52,1.2) -- (11.52,0.95);
+\node[sbox=ccol, text width=3.7cm] at (11.52,0.55) {second column ISAB, independent weights\\then a separate row readout};
+
+% second row
+\begin{scope}[xshift=-11.45cm, yshift=-6.9cm]
+\draw[panel=cicl]  (13.95,\db) rectangle (18.75,\dt);
+\draw[panel=cdec]  (19.0,\db)  rectangle (22.6,\dt);
+
+% ICL block detail
+\node[ptitle=cicl] at (14.07,6.48) {ICL block (detail)};
+\node[font=\tiny] (in) at (15.45,6.0) {$Z^{(l-1)}$ or $U^{(l-1)}$};
+\node[sbox=cicl, minimum width=1.6cm] (n1) at (15.45,5.45) {RMSNorm};
+\node[sbox=cicl, text width=1.9cm] (at) at (15.45,4.6) {attention on $Z^{(l-1)}$\\rescale queries\\(Eq.~\ref{eq:query-scaling})};
+\node[plus] (a1) at (15.45,3.75) {$+$};
+\node[sbox=cicl, minimum width=1.6cm] (n2) at (15.45,3.2) {RMSNorm};
+\node[sbox=cicl, minimum width=1.6cm] (ml) at (15.45,2.55) {MLP, GELU, $2d$};
+\node[plus] (a2) at (15.45,1.9) {$+$};
+\node[font=\tiny] (out) at (15.45,1.38) {$Z^{(l)}$ or $U^{(l)}$};
+\draw[flow] (in) -- (n1); \draw[flow] (n1) -- (at); \draw[flow] (at) -- (a1);
+\draw[flow] (a1) -- (n2); \draw[flow] (n2) -- (ml); \draw[flow] (ml) -- (a2); \draw[flow] (a2) -- (out);
+\draw[flow] (15.45,5.78) -- (14.2,5.78) -- (14.2,3.75) -- (a1);
+\draw[flow] (15.45,3.5) -- (14.2,3.5) -- (14.2,1.9) -- (a2);
+\node[note] at (15.45,0.65) {output projections\\start at zero};
+% attention mask: rows are queries, columns are keys
+\node[font=\tiny, text=black!70] at (17.75,6.0) {keys};
+\foreach \j/\t in {0/$T$, 1/ctx, 2/qry} \node[font=\tiny] at (17.35+\j*0.4,5.68) {\t};
+\foreach \i/\t in {0/$T$, 1/ctx, 2/qry} \node[font=\tiny, anchor=east] at (17.1,5.25-\i*0.4) {\t};
+\foreach \i in {0,1,2} {
+  \foreach \j in {0,1} \filldraw[fill=cicl!55, draw=black!40, line width=0.3pt] (17.15+\j*0.4,5.05-\i*0.4) rectangle ++(0.4,0.4);
+  \filldraw[fill=white, draw=black!40, line width=0.3pt] (17.95,5.05-\i*0.4) rectangle ++(0.4,0.4);
+}
+\node[note, text width=2.3cm] at (17.65,3.5) {attention mask: rows are\\queries, columns keys};
+\node[note, text width=2.3cm] at (17.65,2.65) {query rows: 8 heads share\\one key/value head};
+\node[note, text width=2.3cm] at (17.65,1.8) {16 thinking rows act\\as registers};
+
+% decoder detail
+\node[ptitle=cdec] at (19.12,6.48) {Retrieval decoder (detail)};
+\node[sbox=cdec, text width=1.2cm] (ui) at (19.95,5.6) {query $u_i$};
+\node[sbox=cdec, text width=1.2cm] (zj) at (21.7,5.6) {context $z_j$};
+\node[sbox=cdec, text width=1.2cm] (qh) at (19.95,4.75) {$W_q^h u_i$, scaled};
+\node[sbox=cdec, text width=1.2cm] (kh) at (21.7,4.75) {$W_k^h z_j$};
+\draw[flow] (ui) -- (qh); \draw[flow] (zj) -- (kh);
+\node[sbox=cdec, text width=3.0cm] (al) at (20.8,3.85) {$\alpha^h_{ij}=\mathrm{softmax}_j\big(\langle q,k_j\rangle/\sqrt{d_h}\big)$};
+\draw[flow] (qh) -- (al); \draw[flow] (kh) -- (al);
+\node[sbox=cdec, text width=3.0cm] (pp) at (20.8,2.9) {$p_c=\frac{1}{H}\sum_h\sum_j\alpha^h_{ij}\,\mathbf{1}[y_j{=}c]$};
+\draw[flow] (al) -- (pp);
+\node[sbox=cdec, text width=3.0cm] (lg) at (20.8,1.85) {$\ell_c=\log\big(\max(p_c,10^{-5})$\\$+\,3\cdot10^{-5}\big)$; then softmax};
+\draw[flow] (pp) -- (lg);
+\node[note] at (20.8,0.65) {$H=4$ heads; up to 16 label\\slots, no class-specific output layer};
+\end{scope}
+\end{tikzpicture}

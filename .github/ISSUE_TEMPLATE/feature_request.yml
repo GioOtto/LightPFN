@@ -1,0 +1,21 @@
+name: Feature request
+description: Propose a change or a new capability. / Proponi una modifica o una nuova funzione.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Problema
+      description: What you are trying to do and why the current version does not cover it. / Cosa vuoi fare e perché la versione attuale non lo copre.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal / Proposta
+      description: The change you have in mind. Model changes should keep the parameter count near 4.6M. / La modifica che hai in mente. Le modifiche al modello devono tenere i parametri vicino a 4,6M.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence / Evidenze
+      description: Results on datasets outside TabArena, with paired comparisons if you have them. / Risultati su dataset esterni a TabArena, con confronti appaiati se li hai.

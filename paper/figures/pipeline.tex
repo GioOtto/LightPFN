@@ -1,0 +1,68 @@
+% Chunked stream: CPU producer, chunks on disk, data-parallel consumer; learning-rate schedule below.
+\begin{tikzpicture}[x=1cm, y=1cm]
+
+% panels
+\draw[panel=cdata] (0,2.9)    rectangle (2.9,7.0);
+\draw[panel=ccell] (3.2,2.9)  rectangle (6.0,7.0);
+\draw[panel=cin]   (6.3,2.9)  rectangle (11.0,7.0);
+\draw[panel=cgpu]  (11.3,2.9) rectangle (16.4,7.0);
+\foreach \a/\b in {2.9/3.2, 6.0/6.3, 11.0/11.3} \draw[bigflow] (\a-0.05,5.6) -- (\b+0.05,5.6);
+
+% priors
+\node[ptitle=cdata] at (0.12,6.88) {Priors};
+\node[sbox=cdata, text width=2.3cm] at (1.45,5.95) {graph SCM v3\\weight 0.90, seed $\sigma_{\mathrm{v3}}+k$};
+\node[sbox=cdata, text width=2.3cm] at (1.45,4.95) {rule tasks v1\\weight 0.10, seed $\sigma_{\mathrm{rule}}+k$};
+\node[note, text width=2.5cm] at (1.45,3.65) {chunk $k$ is regenerated\\byte for byte from its seeds};
+
+% generator
+\node[ptitle=ccell] at (3.32,6.88) {CPU generator};
+\node[sbox=ccell, text width=2.3cm] at (4.6,5.95) {72 processes\\on 80 physical cores};
+\node[sbox=ccell, text width=2.3cm] at (4.6,4.95) {about 120 tasks/s,\\twice the demand};
+\node[note, text width=2.5cm] at (4.6,3.65) {waits when $k-f\ge A$\\or the disk is short};
+
+% chunks on disk
+\node[ptitle=cin] at (6.42,6.88) {Chunks on disk};
+\node[draw=black!35, dashed, fill=white, rounded corners=2pt, minimum width=0.78cm, minimum height=1.3cm,
+      font=\tiny, text=black!45, align=center] at (6.95,5.3) {$c_{k-1}$\\deleted};
+\node[draw=cgpu!80, fill=cgpu!18, rounded corners=2pt, minimum width=0.78cm, minimum height=1.3cm,
+      font=\tiny, align=center, line width=0.8pt] at (7.85,5.3) {$c_{k}$\\in use};
+\foreach \i/\l in {0/{k+1}, 1/{k+2}, 2/{k+3}}
+  \node[draw=cin!70, fill=black!7, rounded corners=2pt, minimum width=0.78cm, minimum height=1.3cm,
+        font=\tiny, align=center] at (8.75+\i*0.9,5.3) {$c_{\l}$\\ready};
+\draw[decorate, decoration={brace, amplitude=4pt, mirror}, black!55] (8.35,4.55) -- (10.95,4.55);
+\node[note] at (9.65,4.2) {at most $A=3$ chunks ahead};
+\node[note, text width=3.3cm] at (9.15,3.35) {each chunk: 226,816 graph and 25,344 rule\\tasks for 7,500 steps, read twice};
+
+% trainer
+\node[ptitle=cgpu] at (11.42,6.88) {Data-parallel trainer};
+\node[sbox=cgpu, text width=1.35cm] (g0) at (12.3,5.75) {GPU 0\\32 tasks};
+\node[sbox=cgpu, text width=1.35cm] (g1) at (15.0,5.75) {GPU 1\\32 tasks};
+\draw[{Stealth[length=1.4mm]}-{Stealth[length=1.4mm]}, line width=0.6pt, cgpu] (g0) -- node[below, font=\tiny, text=black!70] {all-reduce} (g1);
+\node[note, text width=4.6cm] at (13.65,4.75) {one gradient all-reduce per step,\\64 tasks per step, about 0.54 s};
+\node[sbox=cgpu, text width=2.0cm] at (12.6,3.6) {checkpoint every\\1,000 steps};
+\node[sbox=cgpu, text width=2.0cm] at (14.95,3.6) {D1, D2, D3 at 30k,\\60k, 90k, 120k};
+
+% feedback
+\draw[flow, dashed, black!55] (13.6,2.95) -- (13.6,2.6) -- node[below, font=\tiny, text=black!65, pos=0.45] {chunk finished: delete it and let the generator advance} (6.95,2.6) -- (6.95,4.6);
+
+
+% learning-rate schedule of the final run, computed from the formula in Section 5
+\begin{axis}[at={(0.5cm,-1.6cm)}, anchor=south west, width=15.6cm, height=4.2cm,
+  scaled y ticks=false,
+  xmin=0, xmax=120000, ymin=0, ymax=1.12e-3,
+  xtick={0,15000,30000,45000,60000,75000,90000,105000,120000},
+  xticklabels={0,15k,30k,45k,60k,75k,90k,105k,120k},
+  extra x ticks={7500,22500,37500,52500,67500,82500,97500,112500}, extra x tick labels={},
+  extra x tick style={grid=major, major grid style={black!15, dashed}},
+  ytick={1e-4,5e-4,1e-3}, yticklabels={$10^{-4}$,$5\cdot10^{-4}$,$10^{-3}$},
+  xlabel={step $s$}, ylabel={$\eta_s$},
+  grid=major, grid style={black!12},
+  tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  scaled x ticks=false]
+\addplot[cgpu!80!black, line width=1pt, domain=0:2000, samples=2] {1e-3*(x+1)/2000};
+\addplot[cgpu!80!black, line width=1pt, domain=2000:120000, samples=240]
+  {1e-3*(0.1+0.45*(1+cos(deg(pi*(x-2000)/118000))))};
+\node[font=\scriptsize, text=black!65, anchor=north east, align=right] at (axis cs:118000,1.08e-3)
+  {16 chunks of 7,500 steps (dashed): each segment resumes\\from the last checkpoint on the same schedule};
+\end{axis}
+\end{tikzpicture}

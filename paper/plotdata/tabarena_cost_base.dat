@@ -1,0 +1,6 @@
+time,rank,label,anchor
+4.9368,3.5000,CatBoost,north
+0.2262,5.3421,LightGBM,south west
+0.1338,5.8158,XGBoost,east
+0.2158,5.8947,RF,north west
+1.4972,1.5789,TabICLv2,west

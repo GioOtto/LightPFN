@@ -1,0 +1,5 @@
+# Keep LF everywhere so bash scripts and Python files survive a Windows checkout.
+* text=auto eol=lf
+*.pt binary
+*.npz binary
+*.png binary

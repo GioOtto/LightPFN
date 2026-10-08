@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use LightPFN, please cite the technical report."
+title: "LightPFN"
+type: software
+authors:
+  - family-names: Ottoboni
+    given-names: Giorgio
+license: Apache-2.0
+repository-code: "https://github.com/GioOtto/LightPFN"
+url: "https://github.com/GioOtto/LightPFN"
+version: 1.0.0
+date-released: "2026-10-08"
+keywords:
+  - tabular data
+  - classification
+  - in-context learning
+  - foundation model
+  - prior-data fitted network
+preferred-citation:
+  type: report
+  title: "A Sling Against Giants: LightPFN, a 4.6M-parameter tabular in-context classifier designed to stay small"
+  authors:
+    - family-names: Ottoboni
+      given-names: Giorgio
+  year: 2026
+  url: "https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN_report.pdf"

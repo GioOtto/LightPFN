@@ -1,0 +1,11 @@
+LightPFN
+Copyright 2026 Giorgio Ottoboni
+
+This product includes software and model weights licensed under the Apache License, Version 2.0.
+
+The model was trained from scratch on synthetic data only, without distillation and without weights or
+outputs of other tabular foundation models.
+
+The optional training code (lightpfn.prior) uses the structural causal model prior of TabICL
+(https://github.com/soda-inria/tabicl, BSD-3-Clause, Copyright (c) 2025, Soda team @ Inria) as an installed
+dependency; TabICL code is not redistributed in this repository or in the published wheel.

@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work as documented. / Qualcosa non funziona come documentato.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use a minimal synthetic example. Do not paste private data or tokens.
+        Usa un esempio sintetico minimo. Non incollare dati privati o token.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened / Cosa è successo
+      description: Expected and actual behavior, with the full error message. / Comportamento atteso e ottenuto, con il messaggio di errore completo.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction / Riproduzione minima
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LightPFN version / Versione di LightPFN
+      placeholder: python -c "import lightpfn; print(lightpfn.__version__)"
+    validations:
+      required: true
+  - type: dropdown
+    id: device
+    attributes:
+      label: Device / Dispositivo
+      options: ["cpu", "cuda (NVIDIA)", "cuda (AMD ROCm)", "vulkan", "auto"]
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment / Ambiente
+      description: OS, Python, torch, scikit-learn, GPU and driver (for Vulkan, the output of `python -c "import lightpfn.vulkan as v; print(v.adapters())"`).
