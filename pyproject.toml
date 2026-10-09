@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "LightPFN"
-version = "1.0.0"
+version = "1.1.0"
 description = "A 4.6M-parameter tabular classifier pretrained only on synthetic data, with a scikit-learn API and CPU, CUDA/ROCm and Vulkan inference"
 readme = "README.md"
 requires-python = ">=3.10"
