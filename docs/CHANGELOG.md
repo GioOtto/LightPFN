@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here. Versions follow [semantic versioning](https://semver.org/).
 
+## 1.1.0 (unreleased)
+
+- `LightPFNClassifier` now defaults to `n_estimators=4`, the configuration reported as
+  "LightPFN (default)" on TabArena. Predictions change and CPU fit is about four times slower; pass
+  `n_estimators=1` for the previous behaviour.
+
 ## 1.0.0 (2026-10-08)
 
 First public release.

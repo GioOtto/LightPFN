@@ -14,7 +14,7 @@ python -c "import lightpfn.vulkan as v; print(v.adapters())"
 ```python
 from lightpfn import LightPFNClassifier
 
-clf = LightPFNClassifier(device="vulkan", n_estimators=4).fit(X_train, y_train)
+clf = LightPFNClassifier(device="vulkan").fit(X_train, y_train)
 ```
 
 `device="auto"` usa Vulkan quando PyTorch non vede una GPU CUDA o ROCm e wgpu trova una GPU Vulkan.

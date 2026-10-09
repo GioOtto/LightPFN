@@ -103,7 +103,7 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
     during fit, leaving the constructor parameter and its device unchanged.
     """
 
-    def __init__(self, model=None, checkpoint=None, device="auto", n_estimators=1, max_context=20000,
+    def __init__(self, model=None, checkpoint=None, device="auto", n_estimators=4, max_context=20000,
                  chunk_rows=2048, n_threads=None, seed=0, *, chunk_cells="auto", batch_cells="auto", fold=True,
                  random_state=None, repo_id=None, revision=None, cache_dir=None, local_files_only=False,
                  cache_context=True):

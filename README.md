@@ -30,15 +30,15 @@ context and the test rows in one forward pass. It does not train on your data an
 ```python
 from lightpfn import LightPFNClassifier
 
-clf = LightPFNClassifier(n_estimators=4).fit(X_train, y_train)
+clf = LightPFNClassifier().fit(X_train, y_train)
 proba = clf.predict_proba(X_test)
 ```
 
 - **Small.** 4,603,088 parameters, 18 MB of weights, designed for a commodity CPU. TabICLv2 has six
   times as many.
-- **Accurate without tuning.** On 55 OpenML datasets outside TabArena, mean AUC 0.911: 0.86 points above
-  default CatBoost and 1.8 to 2.1 points above default LightGBM, XGBoost and random forest. On the 38
-  TabArena classification tasks, lower error than default CatBoost on 76% of the tasks.
+- **Accurate without tuning.** On the 38 TabArena classification tasks, lower error than default CatBoost
+  on 76% of the tasks; the mean AUC gap, +0.28 points [-0.26, 0.80], is not significant. On the 55 OpenML
+  datasets of the development set, used for design decisions, 0.86 points above default CatBoost.
 - **Any GPU.** CUDA and ROCm through PyTorch, and a Vulkan backend with its own WGSL compute kernels for
   AMD, Intel and NVIDIA GPUs on Linux and Windows, with no CUDA or ROCm install. On an RX 7900 XT it is
   6 to 10 times faster than a 16-thread CPU.
@@ -53,28 +53,33 @@ proba = clf.predict_proba(X_test)
 LightPFN uses its default configuration with four estimators, eight-fold bagging and the official validation
 protocol. All 38 tasks succeeded, none imputed. **25th of 99, Elo 1420 (+67 / -66)**.
 
-| Method | Elo | 95% CI |
-|---|---:|---:|
-| TabICLv2 (default) | 1558 | +77 / -68 |
-| TabDPT-1.3 (default) | 1467 | +78 / -54 |
-| RealMLP (tuned + ensembled) | 1459 | +50 / -47 |
-| **LightPFN (default)** | **1420** | **+67 / -66** |
-| CatBoost (tuned) | 1378 | +58 / -55 |
-| CatBoost (tuned + ensembled) | 1370 | +58 / -48 |
-| LightGBM (tuned + ensembled) | 1365 | +52 / -42 |
-| XGBoost (tuned + ensembled) | 1346 | +58 / -62 |
-| CatBoost (default) | 1339 | +49 / -52 |
-| XGBoost (default) | 1191 | +57 / -69 |
-| LightGBM (default) | 1144 | +59 / -63 |
-| RandomForest (default) | 1000 | +71 / -84 |
+| Rank | Method | Elo | 95% CI |
+|---:|---|---:|---:|
+| 1-17 | 17 methods, from Kumo-Tabular (default) to TabPFN-2.6 (default) | 1995-1559 | |
+| 18 | TabICLv2 (default) | 1558 | +77 / -68 |
+| 19 | RealTabPFN-2.5 (tuned + ensembled) | 1551 | +79 / -74 |
+| 20 | RealTabPFN-2.5 (default) | 1517 | +61 / -54 |
+| 21 | RealTabPFN-2.5 (tuned) | 1512 | +68 / -62 |
+| 22 | AutoGluon 1.4 (best, 4h) | 1503 | +77 / -56 |
+| 23 | TabDPT-1.3 (default) | 1467 | +78 / -54 |
+| 24 | RealMLP (tuned + ensembled) | 1459 | +50 / -47 |
+| **25** | **LightPFN (default)** | **1420** | **+67 / -66** |
+| 29 | CatBoost (tuned) | 1378 | +58 / -55 |
+| 32 | CatBoost (tuned + ensembled) | 1370 | +58 / -48 |
+| 33 | LightGBM (tuned + ensembled) | 1365 | +52 / -42 |
+| 38 | XGBoost (tuned + ensembled) | 1346 | +58 / -62 |
+| 41 | CatBoost (default) | 1339 | +49 / -52 |
+| 70 | XGBoost (default) | 1191 | +57 / -69 |
+| 76 | LightGBM (default) | 1144 | +59 / -63 |
+| 89 | RandomForest (default) | 1000 | +71 / -84 |
 
 <p align="center"><img src="https://raw.githubusercontent.com/GioOtto/LightPFN/main/docs/assets/tabarena_lite_pareto.png" width="100%" alt="TabArena-Lite: Elo against fit time, LightPFN highlighted among foundation models" /></p>
 
 The point estimate is above every GBDT in this leaderboard, including tuned and ensembled entries; the intervals
 with tuned CatBoost overlap, so this does not establish a clear win. TabICLv2 and larger foundation models
-lead. Median fit time is 0.65 s per 1,000 rows on the RX 7900 XT; among entries with at least its Elo, only
-TabDPT-1.3 has a lower reported time. Leaderboard timings come from different hardware. This is an author-run
-Lite evaluation; TabArena maintainers re-run the full benchmark before leaderboard inclusion.
+lead. Median fit time is 0.65 s per 1,000 rows on an RX 7900 XT; the other timings in the plot are TabArena's
+published measurements on different hardware, so it is not a controlled speed comparison. This is an
+author-run Lite evaluation; TabArena maintainers re-run the full benchmark before leaderboard inclusion.
 [Protocol, results and artifacts](https://github.com/GioOtto/LightPFN/blob/main/docs/en/RESULTS.md).
 
 ## Install
@@ -101,7 +106,7 @@ from lightpfn import LightPFNClassifier
 X, y = load_breast_cancer(return_X_y=True)
 X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, random_state=0)
 
-clf = LightPFNClassifier(n_estimators=4, random_state=0)
+clf = LightPFNClassifier(random_state=0)
 clf.fit(X_train, y_train)
 print(roc_auc_score(y_test, clf.predict_proba(X_test)[:, 1]))
 ```
@@ -159,17 +164,6 @@ rows, when you want a strong model without tuning. Know its limits:
 Baselines at default settings. Differences in AUC points (100 times the AUC difference) with 95% paired
 bootstrap intervals. Full tables, per-task results and timings: [docs/en/RESULTS.md](https://github.com/GioOtto/LightPFN/blob/main/docs/en/RESULTS.md).
 
-**55 OpenML-CC18 datasets outside TabArena** (at most 1,000 rows and 100 features, five-fold
-cross-validation, one estimator):
-
-| Model | Mean AUC | LightPFN minus model |
-|---|---:|---:|
-| **LightPFN** | **0.911** | |
-| CatBoost | 0.902 | +0.86 [0.42, 1.40] |
-| Random forest | 0.893 | +1.76 |
-| LightGBM | 0.891 | +2.02 |
-| XGBoost (54 datasets: its wrapper fails on one) | 0.889 | +2.06 [1.32, 2.94] |
-
 **TabArena, 38 classification tasks** (official splits, first repeat, run with our own harness, which is
 not the official leaderboard protocol):
 
@@ -182,6 +176,17 @@ not the official leaderboard protocol):
 | LightGBM | 0.844 | 5.34 | 5% |
 | Random forest | 0.838 | 5.89 | 3% |
 | XGBoost | 0.833 | 5.82 | 11% |
+
+**Development set: 55 OpenML-CC18 datasets outside TabArena** (used for design decisions, so the estimate is
+optimistic; at most 1,000 rows and 100 features, five-fold cross-validation, one estimator):
+
+| Model | Mean AUC | LightPFN minus model |
+|---|---:|---:|
+| **LightPFN** | **0.911** | |
+| CatBoost | 0.902 | +0.86 [0.42, 1.40] |
+| Random forest | 0.893 | +1.76 |
+| LightGBM | 0.891 | +2.02 |
+| XGBoost (54 datasets: its wrapper fails on one) | 0.889 | +2.06 [1.32, 2.94] |
 
 ## How it works
 

@@ -32,7 +32,7 @@ rispetto a uno e migliorano il rank medio su sette modelli da 3,37 a 2,50, a un 
 ## Parametri
 
 ```python
-LightPFNClassifier(model=None, checkpoint=None, device="auto", n_estimators=1, max_context=20000,
+LightPFNClassifier(model=None, checkpoint=None, device="auto", n_estimators=4, max_context=20000,
                    chunk_rows=2048, n_threads=None, seed=0, *, chunk_cells="auto", batch_cells="auto",
                    fold=True, random_state=None, repo_id=None, revision=None, cache_dir=None,
                    local_files_only=False, cache_context=True)
@@ -40,7 +40,7 @@ LightPFNClassifier(model=None, checkpoint=None, device="auto", n_estimators=1, m
 
 | Parametro | Default | Significato |
 |---|---|---|
-| `n_estimators` | `1` | estimatori mediati su permutazioni di feature e slot di etichetta; 4 è una buona scelta per l'accuratezza |
+| `n_estimators` | `4` | estimatori mediati su permutazioni di feature e slot di etichetta; 1 è circa quattro volte più veloce su CPU |
 | `device` | `"auto"` | `"auto"`, `"cpu"`, `"cuda[:i]"`, `"vulkan[:i]"`; vedi [Dispositivi](#dispositivi) |
 | `max_context` | `20000` | oltre questo numero di righe di training, ogni estimatore legge un sottoinsieme stratificato di questa dimensione |
 | `random_state` | `None` | seme di permutazioni e sottoinsiemi (`seed` è il vecchio alias; impostane uno solo) |

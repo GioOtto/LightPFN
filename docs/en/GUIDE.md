@@ -32,7 +32,7 @@ and improve the mean rank among seven models from 3.37 to 2.50, at four times th
 ## Parameters
 
 ```python
-LightPFNClassifier(model=None, checkpoint=None, device="auto", n_estimators=1, max_context=20000,
+LightPFNClassifier(model=None, checkpoint=None, device="auto", n_estimators=4, max_context=20000,
                    chunk_rows=2048, n_threads=None, seed=0, *, chunk_cells="auto", batch_cells="auto",
                    fold=True, random_state=None, repo_id=None, revision=None, cache_dir=None,
                    local_files_only=False, cache_context=True)
@@ -40,7 +40,7 @@ LightPFNClassifier(model=None, checkpoint=None, device="auto", n_estimators=1, m
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `n_estimators` | `1` | estimators averaged over feature and label-slot permutations; 4 is a good accuracy setting |
+| `n_estimators` | `4` | estimators averaged over feature and label-slot permutations; 1 is about four times faster on CPU |
 | `device` | `"auto"` | `"auto"`, `"cpu"`, `"cuda[:i]"`, `"vulkan[:i]"`; see [Devices](#devices) |
 | `max_context` | `20000` | above this many training rows, each estimator reads a stratified subsample of this size |
 | `random_state` | `None` | seed of the permutations and subsamples (`seed` is the older alias; set one of the two) |

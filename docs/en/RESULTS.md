@@ -51,29 +51,29 @@ none imputed. The 13 regression datasets are excluded.
 **25th of 99 methods, Elo 1420 (+67 / -66)**; mean rank 38.37, harmonic rank 17.37, score 0.270.
 25th is the position sorted by Elo; mean rank is a separate metric computed over datasets.
 
-| Method | Elo | 95% CI |
-|---|---:|---:|
-| Kumo-Tabular (default) | 1995 | +163 / -119 |
-| LimiX-2 (default) | 1860 | +169 / -109 |
-| Mitra-v2 (default) | 1727 | +134 / -95 |
-| TabPFN-2.6 (default) | 1559 | +60 / -53 |
-| TabICLv2 (default) | 1558 | +77 / -68 |
-| TabDPT-1.3 (default) | 1467 | +78 / -54 |
-| RealMLP (tuned + ensembled) | 1459 | +50 / -47 |
-| **LightPFN (default)** | **1420** | **+67 / -66** |
-| RealMLP (tuned) | 1403 | +54 / -57 |
-| CatBoost (tuned) | 1378 | +58 / -55 |
-| CatBoost (tuned + ensembled) | 1370 | +58 / -48 |
-| LightGBM (tuned + ensembled) | 1365 | +52 / -42 |
-| XGBoost (tuned + ensembled) | 1346 | +58 / -62 |
-| TabICL (default) [5.26% imputed] | 1343 | +72 / -65 |
-| CatBoost (default) | 1339 | +49 / -52 |
-| XGBoost (default) | 1191 | +57 / -69 |
-| LightGBM (tuned) | 1316 | +52 / -47 |
-| XGBoost (tuned) | 1320 | +64 / -62 |
-| LightGBM (default) | 1144 | +59 / -63 |
-| RealMLP (default) | 1247 | +64 / -53 |
-| RandomForest (default) | 1000 | +71 / -84 |
+| Rank | Method | Elo | 95% CI |
+|---:|---|---:|---:|
+| 1 | Kumo-Tabular (default) | 1995 | +163 / -119 |
+| 2 | LimiX-2 (default) | 1860 | +169 / -109 |
+| 12 | Mitra-v2 (default) | 1727 | +134 / -95 |
+| 17 | TabPFN-2.6 (default) | 1559 | +60 / -53 |
+| 18 | TabICLv2 (default) | 1558 | +77 / -68 |
+| 23 | TabDPT-1.3 (default) | 1467 | +78 / -54 |
+| 24 | RealMLP (tuned + ensembled) | 1459 | +50 / -47 |
+| **25** | **LightPFN (default)** | **1420** | **+67 / -66** |
+| 26 | RealMLP (tuned) | 1403 | +54 / -57 |
+| 29 | CatBoost (tuned) | 1378 | +58 / -55 |
+| 32 | CatBoost (tuned + ensembled) | 1370 | +58 / -48 |
+| 33 | LightGBM (tuned + ensembled) | 1365 | +52 / -42 |
+| 38 | XGBoost (tuned + ensembled) | 1346 | +58 / -62 |
+| 39 | TabICL (default) [5.26% imputed] | 1343 | +72 / -65 |
+| 41 | CatBoost (default) | 1339 | +49 / -52 |
+| 44 | XGBoost (tuned) | 1320 | +64 / -62 |
+| 45 | LightGBM (tuned) | 1316 | +52 / -47 |
+| 61 | RealMLP (default) | 1247 | +64 / -53 |
+| 70 | XGBoost (default) | 1191 | +57 / -69 |
+| 76 | LightGBM (default) | 1144 | +59 / -63 |
+| 89 | RandomForest (default) | 1000 | +71 / -84 |
 
 The Elo point estimate is above every GBDT in the comparison, including tuned and ensembled entries. The
 intervals with tuned CatBoost (1378, +58 / -55) overlap and do not establish a clear win. TabICLv2 and larger

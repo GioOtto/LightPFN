@@ -52,29 +52,29 @@ un checkpoint e nessuno spazio HPO. La cache del contesto è disattivata nei fol
 **25° su 99 metodi, Elo 1420 (+67 / -66)**; rank medio 38,37, rank armonico 17,37, score 0,270.
 Il 25° posto è la posizione ordinata per Elo; il rank medio è una metrica distinta calcolata sui dataset.
 
-| Metodo | Elo | IC 95% |
-|---|---:|---:|
-| Kumo-Tabular (default) | 1995 | +163 / -119 |
-| LimiX-2 (default) | 1860 | +169 / -109 |
-| Mitra-v2 (default) | 1727 | +134 / -95 |
-| TabPFN-2.6 (default) | 1559 | +60 / -53 |
-| TabICLv2 (default) | 1558 | +77 / -68 |
-| TabDPT-1.3 (default) | 1467 | +78 / -54 |
-| RealMLP (tuned + ensembled) | 1459 | +50 / -47 |
-| **LightPFN (default)** | **1420** | **+67 / -66** |
-| RealMLP (tuned) | 1403 | +54 / -57 |
-| CatBoost (tuned) | 1378 | +58 / -55 |
-| CatBoost (tuned + ensembled) | 1370 | +58 / -48 |
-| LightGBM (tuned + ensembled) | 1365 | +52 / -42 |
-| XGBoost (tuned + ensembled) | 1346 | +58 / -62 |
-| TabICL (default) [5.26% imputed] | 1343 | +72 / -65 |
-| CatBoost (default) | 1339 | +49 / -52 |
-| XGBoost (default) | 1191 | +57 / -69 |
-| LightGBM (tuned) | 1316 | +52 / -47 |
-| XGBoost (tuned) | 1320 | +64 / -62 |
-| LightGBM (default) | 1144 | +59 / -63 |
-| RealMLP (default) | 1247 | +64 / -53 |
-| RandomForest (default) | 1000 | +71 / -84 |
+| Posizione | Metodo | Elo | IC 95% |
+|---:|---|---:|---:|
+| 1 | Kumo-Tabular (default) | 1995 | +163 / -119 |
+| 2 | LimiX-2 (default) | 1860 | +169 / -109 |
+| 12 | Mitra-v2 (default) | 1727 | +134 / -95 |
+| 17 | TabPFN-2.6 (default) | 1559 | +60 / -53 |
+| 18 | TabICLv2 (default) | 1558 | +77 / -68 |
+| 23 | TabDPT-1.3 (default) | 1467 | +78 / -54 |
+| 24 | RealMLP (tuned + ensembled) | 1459 | +50 / -47 |
+| **25** | **LightPFN (default)** | **1420** | **+67 / -66** |
+| 26 | RealMLP (tuned) | 1403 | +54 / -57 |
+| 29 | CatBoost (tuned) | 1378 | +58 / -55 |
+| 32 | CatBoost (tuned + ensembled) | 1370 | +58 / -48 |
+| 33 | LightGBM (tuned + ensembled) | 1365 | +52 / -42 |
+| 38 | XGBoost (tuned + ensembled) | 1346 | +58 / -62 |
+| 39 | TabICL (default) [5.26% imputed] | 1343 | +72 / -65 |
+| 41 | CatBoost (default) | 1339 | +49 / -52 |
+| 44 | XGBoost (tuned) | 1320 | +64 / -62 |
+| 45 | LightGBM (tuned) | 1316 | +52 / -47 |
+| 61 | RealMLP (default) | 1247 | +64 / -53 |
+| 70 | XGBoost (default) | 1191 | +57 / -69 |
+| 76 | LightGBM (default) | 1144 | +59 / -63 |
+| 89 | RandomForest (default) | 1000 | +71 / -84 |
 
 L'Elo stimato supera tutti i GBDT del confronto, anche ottimizzati e in ensemble. Gli intervalli con CatBoost
 tuned (1378, +58 / -55) si sovrappongono: non dimostrano una vittoria netta. TabICLv2 e i modelli fondazionali
