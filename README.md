@@ -36,9 +36,9 @@ proba = clf.predict_proba(X_test)
 
 - **Small.** 4,603,088 parameters, 18 MB of weights, designed for a commodity CPU. TabICLv2 has six
   times as many.
-- **Accurate without tuning.** On the 38 TabArena classification tasks, lower error than default CatBoost
-  on 76% of the tasks; the mean AUC gap, +0.28 points [-0.26, 0.80], is not significant. On the 55 OpenML
-  datasets of the development set, used for design decisions, 0.86 points above default CatBoost.
+- **Accurate without tuning.** On the official TabArena leaderboard (38 classification datasets) it ranks
+  21st of 92 methods, above every tree-based method, tuned and ensembled LightGBM, CatBoost and XGBoost
+  included; the intervals of the closest ones overlap with its own.
 - **Any GPU.** CUDA and ROCm through PyTorch, and a Vulkan backend with its own WGSL compute kernels for
   AMD, Intel and NVIDIA GPUs on Linux and Windows, with no CUDA or ROCm install. On an RX 7900 XT it is
   6 to 10 times faster than a 16-thread CPU.
@@ -49,38 +49,33 @@ proba = clf.predict_proba(X_test)
 
 ## Benchmarks
 
-**TabArena-Lite, official pipeline, 38 classification datasets, 99 methods** (8 October 2026).
-LightPFN uses its default configuration with four estimators, eight-fold bagging and the official validation
-protocol. All 38 tasks succeeded, none imputed. **25th of 99, Elo 1420 (+67 / -66)**.
+**[TabArena](https://huggingface.co/spaces/TabArena/leaderboard), official leaderboard, 38 classification
+datasets.** The TabArena maintainers ran LightPFN in its default configuration (four estimators) and verified
+the result. Leaderboard of 11 October 2026, imputed models excluded:
 
-| Rank | Method | Elo | 95% CI |
-|---:|---|---:|---:|
-| 1-17 | 17 methods, from Kumo-Tabular (default) to TabPFN-2.6 (default) | 1995-1559 | |
-| 18 | TabICLv2 (default) | 1558 | +77 / -68 |
-| 19 | RealTabPFN-2.5 (tuned + ensembled) | 1551 | +79 / -74 |
-| 20 | RealTabPFN-2.5 (default) | 1517 | +61 / -54 |
-| 21 | RealTabPFN-2.5 (tuned) | 1512 | +68 / -62 |
-| 22 | AutoGluon 1.4 (best, 4h) | 1503 | +77 / -56 |
-| 23 | TabDPT-1.3 (default) | 1467 | +78 / -54 |
-| 24 | RealMLP (tuned + ensembled) | 1459 | +50 / -47 |
-| **25** | **LightPFN (default)** | **1420** | **+67 / -66** |
-| 29 | CatBoost (tuned) | 1378 | +58 / -55 |
-| 32 | CatBoost (tuned + ensembled) | 1370 | +58 / -48 |
-| 33 | LightGBM (tuned + ensembled) | 1365 | +52 / -42 |
-| 38 | XGBoost (tuned + ensembled) | 1346 | +58 / -62 |
-| 41 | CatBoost (default) | 1339 | +49 / -52 |
-| 70 | XGBoost (default) | 1191 | +57 / -69 |
-| 76 | LightGBM (default) | 1144 | +59 / -63 |
-| 89 | RandomForest (default) | 1000 | +71 / -84 |
+| View | Position | Elo (95% CI) |
+|---|---:|---:|
+| All splits | **21st of 92** | **1441** (+69 / -79) |
+| TabArena-Lite (first split only) | 20th of 92 | 1426 (+71 / -70) |
 
-<p align="center"><img src="https://raw.githubusercontent.com/GioOtto/LightPFN/main/docs/assets/tabarena_lite_pareto.png" width="100%" alt="TabArena-Lite: Elo against fit time, LightPFN highlighted among foundation models" /></p>
+<p align="center"><img src="https://raw.githubusercontent.com/GioOtto/LightPFN/main/docs/assets/tabarena_elo.png" width="100%" alt="TabArena, 38 classification datasets, all splits: Elo with 95% intervals for selected methods; LightPFN is 21st, above every tree-based method" /></p>
 
-The point estimate is above every GBDT in this leaderboard, including tuned and ensembled entries; the intervals
-with tuned CatBoost overlap, so this does not establish a clear win. TabICLv2 and larger foundation models
-lead. Median fit time is 0.65 s per 1,000 rows on an RX 7900 XT; the other timings in the plot are TabArena's
-published measurements on different hardware, so it is not a controlled speed comparison. This is an
-author-run Lite evaluation; TabArena maintainers re-run the full benchmark before leaderboard inclusion.
-[Protocol, results and artifacts](https://github.com/GioOtto/LightPFN/blob/main/docs/en/RESULTS.md).
+- **Above every tree-based method**, tuned and ensembled ones included. The intervals overlap with those of
+  default CatBoost and of the tuned gradient-boosting entries, so against them this is not a clear win; default
+  XGBoost and LightGBM are more than 200 Elo points lower.
+- **Behind larger foundation models.** The first 18 places are all foundation models; TabICLv2 leads by 134 points.
+- **By size:** 19th on the 28 small datasets, above every tree-based method; 44th of 93 on the 10 medium ones,
+  where default CatBoost is 17th.
+
+<p align="center"><img src="https://raw.githubusercontent.com/GioOtto/LightPFN/main/docs/assets/tabarena_pareto.png" width="100%" alt="TabArena: Elo against median training time for 92 methods; LightPFN is on the Pareto front" /></p>
+
+LightPFN is on the Pareto front of Elo against time. At 0.26 s per 1,000 rows only KNN trains faster; at
+0.029 s per 1,000 rows only EBM and default CatBoost predict faster, both with a lower Elo. Timings are
+TabArena's, with LightPFN on a GPU.
+
+On the leaderboard page, select **Classification** and untick **Include imputed models** to get this view. The
+default view also covers the 13 regression datasets, which LightPFN does not support, so they are imputed.
+[Protocol, CSVs and the earlier author-run evaluation](https://github.com/GioOtto/LightPFN/blob/main/docs/en/RESULTS.md#tabarena-official-leaderboard).
 
 ## Install
 

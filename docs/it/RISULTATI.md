@@ -3,14 +3,14 @@
 [English](../en/RESULTS.md) · **Italiano**
 
 I protocolli sono descritti nel [report tecnico](../../paper/LightPFN_report.pdf) (in inglese). Le tabelle
-riportano risultati del report e dei CSV collegati. La sezione ufficiale TabArena-Lite include baseline di
+riportano risultati del report e dei CSV collegati. La sezione ufficiale TabArena include baseline di
 default, ottimizzate e in ensemble; gli altri confronti usano baseline di default. Le differenze di AUC sono in punti (100 volte la differenza di AUC),
 con intervalli bootstrap appaiati al 95% su task o dataset. Il modello rilasciato è il checkpoint a contesto lungo
 (LC39k nel report).
 
 - [Insiemi di valutazione](#insiemi-di-valutazione)
 - [Tabelle piccole: 55 dataset OpenML esterni a TabArena](#tabelle-piccole-55-dataset-openml-esterni-a-tabarena)
-- [TabArena, pipeline ufficiale](#tabarena-pipeline-ufficiale)
+- [TabArena, classifica ufficiale](#tabarena-classifica-ufficiale)
 - [TabArena, 38 task di classificazione con il nostro harness](#tabarena-38-task-di-classificazione-con-il-nostro-harness)
 - [Tabelle più grandi](#tabelle-più-grandi)
 - [Costo](#costo)
@@ -41,56 +41,80 @@ vantaggio su CatBoost vale sia sui dataset binari (+0,80) sia sui multiclasse (+
 
 [CSV dei confronti D3](../assets/d3_baselines.csv), inclusi intervalli bootstrap e percentuali di vittorie.
 
-## TabArena, pipeline ufficiale
+## TabArena, classifica ufficiale
 
-Run degli autori dell'8 ottobre 2026 con `TabArenaV0pt1ExperimentBundle(models=[("LightPFN", 0)])` e
-`subset=["lite", "classification"]`: primo split ufficiale di ciascuno dei 38 dataset di classificazione,
-bagging a otto fold, protocollo di validazione ufficiale `8x1`. Configurazione di default, quattro estimatori,
-un checkpoint e nessuno spazio HPO. La cache del contesto è disattivata nei fold e attiva nel refit. Tutti i
-38 task sono riusciti, nessuno è imputato. I 13 dataset di regressione sono esclusi.
+Classifica dell'11 ottobre 2026 ([Space di TabArena](https://huggingface.co/spaces/TabArena/leaderboard), commit
+dei dati `0aac376`). I maintainer di TabArena hanno eseguito LightPFN sui 38 dataset di classificazione con il
+protocollo ufficiale (bagging a otto fold, validazione `8x1`) nella configurazione di default: quattro
+estimatori, un checkpoint, nessuno spazio di ricerca. Hanno marcato il risultato come verificato; nessuno dei suoi
+risultati è imputato. Le viste qui sotto sono Classification con i modelli imputati esclusi. La vista di default
+della pagina comprende anche i 13 dataset di regressione, che LightPFN non supporta, quindi vengono imputati
+(lì è 42° su 99).
 
-**25° su 99 metodi, Elo 1420 (+67 / -66)**; rank medio 38,37, rank armonico 17,37, score 0,270.
-Il 25° posto è la posizione ordinata per Elo; il rank medio è una metrica distinta calcolata sui dataset.
+| Vista | Dataset | Posizione | Elo (IC 95%) |
+|---|---:|---:|---:|
+| **Classificazione, tutti gli split** | 38 | **21° su 92** | **1441 (+69 / -79)** |
+| Classificazione, Lite (primo split) | 38 | 20° su 92 | 1426 (+71 / -70) |
+| Binaria, tutti gli split | 30 | 23° su 92 | 1419 (+77 / -67) |
+| Multiclasse, tutti gli split | 8 | 17° su 92 | 1560 (+121 / -70) |
+| Dataset piccoli, tutti gli split | 28 | 19° su 92 | 1457 (+79 / -64) |
+| Dataset medi, tutti gli split | 10 | 44° su 93 | 1465 (+156 / -145) |
 
-| Posizione | Metodo | Elo | IC 95% |
-|---:|---|---:|---:|
-| 1 | Kumo-Tabular (default) | 1995 | +163 / -119 |
-| 2 | LimiX-2 (default) | 1860 | +169 / -109 |
-| 12 | Mitra-v2 (default) | 1727 | +134 / -95 |
-| 17 | TabPFN-2.6 (default) | 1559 | +60 / -53 |
-| 18 | TabICLv2 (default) | 1558 | +77 / -68 |
-| 23 | TabDPT-1.3 (default) | 1467 | +78 / -54 |
-| 24 | RealMLP (tuned + ensembled) | 1459 | +50 / -47 |
-| **25** | **LightPFN (default)** | **1420** | **+67 / -66** |
-| 26 | RealMLP (tuned) | 1403 | +54 / -57 |
-| 29 | CatBoost (tuned) | 1378 | +58 / -55 |
-| 32 | CatBoost (tuned + ensembled) | 1370 | +58 / -48 |
-| 33 | LightGBM (tuned + ensembled) | 1365 | +52 / -42 |
-| 38 | XGBoost (tuned + ensembled) | 1346 | +58 / -62 |
-| 39 | TabICL (default) [5.26% imputed] | 1343 | +72 / -65 |
-| 41 | CatBoost (default) | 1339 | +49 / -52 |
-| 44 | XGBoost (tuned) | 1320 | +64 / -62 |
-| 45 | LightGBM (tuned) | 1316 | +52 / -47 |
-| 61 | RealMLP (default) | 1247 | +64 / -53 |
-| 70 | XGBoost (default) | 1191 | +57 / -69 |
-| 76 | LightGBM (default) | 1144 | +59 / -63 |
-| 89 | RandomForest (default) | 1000 | +71 / -84 |
+L'Elo è calcolato tra i metodi di ciascuna vista, quindi i valori non sono confrontabili tra righe.
 
-L'Elo stimato supera tutti i GBDT del confronto, anche ottimizzati e in ensemble. Gli intervalli con CatBoost
-tuned (1378, +58 / -55) si sovrappongono: non dimostrano una vittoria netta. TabICLv2 e i modelli fondazionali
-maggiori restano avanti. TabICL v1 ha il 5,26% di risultati imputati; LightPFN non ne ha.
+![Elo con intervalli al 95% per una selezione di metodi, LightPFN in blu](../assets/tabarena_elo.png)
 
-![Elo rispetto al tempo di fit, LightPFN in viola](../assets/tabarena_lite_pareto.png)
+Metodi selezionati, classificazione, tutti gli split. I tempi sono le mediane di TabArena in secondi per 1.000
+righe; le versioni ottimizzate includono il tempo della ricerca.
 
-Hardware LightPFN: Intel i7-13700KF (16 core, 24 thread), 32 GB RAM, AMD RX 7900 XT 20 GB, Linux,
-ROCm 7.2, PyTorch 2.13.0, Python 3.12.15. Fit mediano 0,65 s e predizione mediana 0,086 s per 1.000 righe.
-Solo TabDPT-1.3 riporta un fit più rapido tra i metodi con Elo almeno pari; i tempi delle baseline sono quelli
-pubblicati da TabArena su hardware diverso, quindi non è un confronto di velocità controllato.
+| Posizione | Metodo | Elo | IC 95% | Training | Predizione |
+|---:|---|---:|---:|---:|---:|
+| 1 | LimiX-2 (default) | 1927 | +137 / -77 | 36,96 | 10,081 |
+| 2 | Kumo-Tabular (default) | 1918 | +163 / -112 | 2,79 | 0,272 |
+| 4 | TabPFN-3.5 (default) | 1845 | +115 / -70 | 1,85 | 0,518 |
+| 14 | TabICLv2 (default) | 1575 | +72 / -69 | 0,93 | 0,142 |
+| 18 | TabDPT-1.3 (default) | 1524 | +75 / -57 | 0,62 | 0,172 |
+| 19 | RealMLP (tuned + ensembled) | 1474 | +53 / -43 | 2879,46 | 12,484 |
+| 20 | TabM (tuned + ensembled) | 1452 | +56 / -40 | 2168,86 | 2,347 |
+| **21** | **LightPFN (default)** | **1441** | **+69 / -79** | **0,26** | **0,029** |
+| 22 | LightGBM (tuned + ensembled) | 1426 | +43 / -29 | 382,09 | 1,487 |
+| 24 | CatBoost (tuned + ensembled) | 1410 | +53 / -44 | 1107 | 0,329 |
+| 27 | CatBoost (tuned) | 1400 | +47 / -43 | 1107 | 0,038 |
+| 31 | CatBoost (default) | 1387 | +44 / -45 | 5,41 | 0,026 |
+| 35 | XGBoost (tuned + ensembled) | 1373 | +40 / -46 | 685,87 | 1,454 |
+| 60 | XGBoost (default) | 1230 | +39 / -46 | 1,77 | 0,117 |
+| 66 | LightGBM (default) | 1191 | +50 / -41 | 1,79 | 0,12 |
+| 87 | RandomForest (default) | 1000 | +62 / -65 | 0,38 | 0,037 |
 
-[CSV della classifica](../assets/tabarena_lite_leaderboard.csv), [script e risultati completi (ZIP)](https://github.com/GioOtto/LightPFN/releases/download/v1.0.0/LightPFN-1.0.0-tabarena-lite.zip).
-Lo script importa `torch` prima di AutoGluon per far rilevare la GPU AMD tramite ROCm. I maintainer TabArena
-rieseguono il benchmark completo sul loro hardware prima dell'inclusione in classifica; questa posizione
-Lite non è un risultato finale verificato dai maintainer.
+L'Elo stimato è sopra tutti i metodi ad alberi, anche ottimizzati e in ensemble. Il suo intervallo si sovrappone
+a quelli di CatBoost di default e delle versioni ottimizzate dei gradient boosting, quindi contro di loro non è una
+vittoria netta; XGBoost e LightGBM di default sono più di 200 punti sotto, con intervalli separati. Nella matrice
+delle vittorie di TabArena LightPFN batte CatBoost, LightGBM e XGBoost ottimizzati e in ensemble nel 58%, 58% e
+64% dei confronti, e TabICLv2 nel 25%. I primi 18 posti sono tutti modelli fondazionali. Il punto debole sono i 10
+dataset medi (44° su 93, dove CatBoost di default è 17°), coerente con i risultati sulle tabelle più grandi più
+sotto.
+
+![Elo rispetto al tempo mediano di addestramento per 92 metodi, LightPFN sul fronte di Pareto](../assets/tabarena_pareto.png)
+
+LightPFN è sul fronte di Pareto tra Elo e tempo di addestramento e tra Elo e tempo di predizione: solo KNN si
+addestra più in fretta e solo EBM e CatBoost di default predicono più in fretta, tutti con un Elo più basso.
+TabArena ha misurato LightPFN su GPU e i metodi ad alberi su CPU, quindi l'asse dei tempi confronta le
+configurazioni come sono state eseguite, non gli algoritmi a parità di hardware.
+
+[CSV della classificazione, tutti gli split](../assets/tabarena_classification_all_splits.csv),
+[CSV della classificazione, Lite](../assets/tabarena_classification_lite.csv) (come pubblicati da TabArena).
+
+### Valutazione Lite precedente degli autori (8 ottobre 2026)
+
+Prima della run dei maintainer abbiamo eseguito noi il benchmark Lite, con
+`TabArenaV0pt1ExperimentBundle(models=[("LightPFN", 0)])` e `subset=["lite", "classification"]`: stessa
+configurazione, primo split ufficiale di ciascun dataset. La cache del contesto è disattivata nei fold e attiva nel
+refit. Tutti i 38 task sono riusciti, nessuno è imputato. Rispetto alla classifica di quel giorno era **25° su 99,
+Elo 1420 (+67 / -66)**. Hardware: Intel i7-13700KF, 32 GB RAM, AMD RX 7900 XT 20 GB, Linux, ROCm 7.2, PyTorch
+2.13.0, Python 3.12.15; fit mediano 0,65 s e predizione mediana 0,086 s per 1.000 righe.
+
+[CSV della classifica di quel giorno](../assets/tabarena_lite_leaderboard.csv), [script e risultati completi (ZIP)](https://github.com/GioOtto/LightPFN/releases/download/v1.0.0/LightPFN-1.0.0-tabarena-lite.zip).
+Lo script importa `torch` prima di AutoGluon per far rilevare la GPU AMD tramite ROCm.
 
 ## TabArena, 38 task di classificazione con il nostro harness
 

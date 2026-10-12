@@ -40,7 +40,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small\scshape A sling against giants}
-\fancyhead[R]{\small\scshape Technical report, version 1.0, October 2026}
+\fancyhead[R]{\small\scshape Technical report, version 1.1, October 2026}
 \fancyfoot[C]{\small\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 \fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\thepage}\renewcommand{\headrulewidth}{0pt}}
@@ -67,7 +67,7 @@
 \vspace{8pt}
 \rule{\linewidth}{0.6pt}\\[14pt]
 {\large Giorgio Ottoboni}\\[4pt]
-{\small Technical report, version 1.0, 8 October 2026}\\[2pt]
+{\small Technical report, version 1.1, 12 October 2026}\\[2pt]
 {\small\url{https://github.com/GioOtto/LightPFN}}
 \end{center}
 \vspace{6pt}
@@ -82,11 +82,11 @@ above default CatBoost. A long-context training stage improves performance on la
 differences from default CatBoost have 95\% bootstrap intervals including zero at 4,000--32,000 training
 rows and, in a separate evaluation on larger datasets, at 10,000--100,000 rows. On 38 TabArena classification
 tasks, using the official splits of one repeat, four estimators rank second among seven evaluated
-configurations, behind TabICLv2, and yield lower error than default CatBoost on 76\% of tasks. A separate
-run of the official TabArena-Lite pipeline on the 38 classification datasets places LightPFN 25th of 99
-methods, with Elo 1420 ($+67/-66$). Its point estimate exceeds all GBDT entries, including tuned and ensembled
-ones, but its interval overlaps tuned CatBoost's. This author-run Lite result awaits the maintainers' full
-benchmark verification. Cache blocking and folded normalization reduce CPU inference time by
+configurations, behind TabICLv2, and yield lower error than default CatBoost on 76\% of tasks. On the
+official TabArena leaderboard, where the maintainers ran and verified it on all splits of the 38 classification
+datasets, LightPFN ranks 21st of 92 methods with Elo 1441 ($+69/-79$). Its point estimate exceeds every
+tree-based entry, including tuned and ensembled ones, but its interval overlaps those of default CatBoost and
+of the tuned gradient-boosting entries. Cache blocking and folded normalization reduce CPU inference time by
 1.1--4.1 times with predictions unchanged up to floating-point rounding. Future work will assess
 inference latency and memory use on less powerful computers, including laptops.
 \end{abstract}
@@ -1431,50 +1431,62 @@ the different hosts and concurrency settings prevent a controlled comparison acr
 \end{figure}
 
 \FloatBarrier
-\subsection{Official TabArena-Lite pipeline}
+\subsection{Official TabArena leaderboard}
 \label{sec:official-lite}
 
-On 8 October 2026 we evaluated the released model through TabArena's own pipeline, separately from the
-harness above. The run uses \texttt{TabArenaV0pt1ExperimentBundle}, the default LightPFN configuration with
-four estimators and no HPO search space, and the \texttt{lite, classification} subset: the first official
-split of each of the 38 classification datasets. The arena enforces its eight-fold inner bagging and
-\texttt{8x1} validation protocol. The wrapper keeps encoded contexts only in the refit model; fold models
-build and release them at prediction. All 38 tasks succeed, with no failed or imputed LightPFN result.
-The comparison includes 99 entries from TabArena's hosted results, including tuned and ensembled baselines.
+Separately from the harness above, the released model was evaluated through TabArena's own pipeline: the
+default LightPFN configuration with four estimators, one checkpoint and no HPO search space, with the arena's
+eight-fold inner bagging and \texttt{8x1} validation protocol. The wrapper keeps encoded contexts only in the
+refit model; fold models build and release them at prediction. After the model class was merged into
+TabArena, the maintainers ran it on all splits of the 38 classification datasets and marked the result as
+verified, with no failed or imputed LightPFN result. No model or recipe was selected on these results.
 
-LightPFN is 25th when entries are sorted by Elo, with Elo 1420 and a 95\% interval of $[1354,1487]$
-($+67/-66$), mean rank 38.37, harmonic rank 17.37 and normalized score .270. Mean rank and position by Elo
-are distinct summaries. Table~\ref{tab:official-lite} lists selected entries. LightPFN's point estimate
-exceeds all GBDT entries in this snapshot, but its interval overlaps that of tuned CatBoost
-(1378, $[1323,1436]$); these marginal intervals do not establish a significant pairwise advantage.
-TabICLv2 and the larger foundation models remain ahead. This is an author-run Lite comparison, not a final
-maintainer-verified leaderboard entry: the maintainers re-run the full benchmark on their hardware before
-inclusion. No model or recipe was selected on these results.
+On the leaderboard of 11 October 2026\footnote{\url{https://huggingface.co/spaces/TabArena/leaderboard}, data
+commit \texttt{0aac376}; view: Classification, imputed models excluded.} LightPFN is 21st of 92 entries by Elo,
+with Elo 1441 and a 95\% interval of $[1362,1510]$ ($+69/-79$); on the Lite view, which uses only the first
+split of each dataset, it is 20th of 92 with Elo 1426 ($+71/-70$). Table~\ref{tab:official-lite} lists selected
+entries. LightPFN's point estimate exceeds every tree-based entry, including tuned and ensembled ones, but its
+interval overlaps those of default CatBoost (1387, $[1342,1431]$) and of the tuned gradient-boosting entries;
+these marginal intervals do not establish a significant pairwise advantage. Default XGBoost and LightGBM are
+211 and 250 points lower, with separate intervals. In TabArena's win-rate matrix LightPFN beats tuned and
+ensembled CatBoost, LightGBM and XGBoost in 58\%, 58\% and 64\% of comparisons. The first 18 places are all
+foundation models; TabICLv2 leads by 134 points and wins 75\% of its comparisons with LightPFN. By subset,
+LightPFN is 19th of 92 on the 28 small datasets, above every tree-based entry, and 44th of 93 on the 10 medium
+datasets, where default CatBoost is 17th, consistent with the larger-table results of
+Section~\ref{sec:large}. The default view of the leaderboard also includes the 13 regression datasets, which
+LightPFN does not support; there its results are imputed and it is 42nd of 99.
 
 \begin{table}[tbp]
 \centering
 \footnotesize
-\input{figures/table_tabarena_lite.tex}
-\caption{Official TabArena-Lite classification pipeline: selected entries among 99 methods, with 95\% Elo
-interval offsets. Four LightPFN estimators, official validation, 38 successful tasks, none imputed.
-The run uses the first official split per dataset and is separate from our harness in Table~\ref{tab:tabarena}.}
+\input{figures/table_tabarena_official.tex}
+\caption{Official TabArena leaderboard, classification, all splits (11 October 2026): selected entries among
+92 methods, with 95\% Elo interval offsets. Four LightPFN estimators, run and verified by the maintainers, none
+imputed. Separate from our harness in Table~\ref{tab:tabarena}.}
 \label{tab:official-lite}
 \end{table}
 
-The LightPFN run uses an Intel i7-13700KF (16 cores, 24 threads), 32 GB RAM and an AMD RX 7900 XT with 20 GB
-VRAM, Linux, ROCm 7.2, PyTorch 2.13.0 and Python 3.12.15. Median fit time is 0.65 s per 1,000 rows and median
-prediction time is 0.086 s per 1,000 rows. Among entries with at least LightPFN's Elo, only TabDPT-1.3 has a
-lower reported fit time (0.61 s per 1,000 rows). Baseline times come from TabArena's published runs on other
-hardware, so this is not a controlled speed comparison. The entry-point script imports Torch before
-AutoGluon so its GPU discovery uses ROCm rather than NVIDIA-only NVML. The results archive includes the
-script, 38 raw result files and the evaluation CSVs:\footnote{\url{https://github.com/GioOtto/LightPFN/releases/tag/v1.0.0}.}
-Figure~\ref{fig:official-lite} plots Elo against fit time.
+TabArena's timings put LightPFN at a median of 0.26 s to train and 0.029 s to predict per 1,000 rows, on a GPU.
+Figure~\ref{fig:official-lite} plots Elo against training time: LightPFN is on the Pareto front, and only KNN
+trains faster. Against prediction time it is also on the front, with only EBM and default CatBoost faster.
+Tree-based methods were timed on a CPU, so the time axis compares the setups as run, not algorithms on equal
+hardware.
+
+Before the maintainers' run we evaluated the Lite subset ourselves on 8 October 2026. That run used
+\texttt{TabArenaV0pt1ExperimentBundle} with the \texttt{lite, classification} subset, on an Intel i7-13700KF,
+32 GB RAM and an AMD RX 7900 XT (Linux, ROCm 7.2, PyTorch 2.13.0, Python 3.12.15). All 38 tasks succeeded;
+against the leaderboard of that day LightPFN was 25th of 99 with Elo 1420 ($+67/-66$), with median fit and
+prediction times of 0.65 s and 0.086 s per 1,000 rows. The entry-point script imports Torch before AutoGluon
+so its GPU discovery uses ROCm rather than NVIDIA-only NVML. The results archive includes the script, 38 raw
+result files and the evaluation CSVs.\footnote{\url{https://github.com/GioOtto/LightPFN/releases/tag/v1.0.0}.}
 
 \begin{figure}[tbp]
 \centering
-\includegraphics[width=\linewidth]{figures/official_lite_pareto.pdf}
-\caption{Official TabArena-Lite classification: Elo against median fit time per 1,000 rows, from the
-leaderboard snapshot. LightPFN is highlighted in the foundation-model color. Hardware differs across methods.}
+\includegraphics[width=\linewidth]{figures/official_pareto.pdf}
+\caption{Official TabArena leaderboard, classification, all splits: Elo against median training time per
+1,000 rows (log scale) for 92 methods, with the Pareto front. LightPFN in blue, tree-based methods in orange.
+Timings are TabArena's: GPU methods on a GPU, tree-based methods on a CPU; tuned entries include their search
+time.}
 \label{fig:official-lite}
 \end{figure}
 
@@ -1572,10 +1584,10 @@ with at most 1,000 rows and 100 features. The scale test covers larger tables wi
 six of them at 16,000 and 32,000 rows, and it also guided the long-context stage; D4 has 13 datasets and one repeat,
 and its intervals are wide. Baselines on D3 and
 in the scale test use default hyperparameters and a single model, as do our TabArena harness runs. The
-separate official Lite comparison includes tuned and ensembled entries, but only one split per classification
-dataset and awaits the maintainers' full-benchmark verification. The final run is a single run, and its comparison with C2 mixes
-longer training with the larger batch and fresh data. The TabArena evaluation covers the 38 classification
-tasks only, with the first of three or ten repeats. On
+official leaderboard comparison includes tuned and ensembled entries and all splits, but its Elo intervals
+are marginal, not pairwise tests. The final run is a single run, and its comparison with C2 mixes
+longer training with the larger batch and fresh data. Both TabArena evaluations cover the 38 classification
+tasks only; our harness uses the first of three or ten repeats. On
 D3 the XGBoost wrapper fails on one task, so its predictive comparison excludes that task from both models. Class counts above ten, exact feature-order
 invariance, and the isolated effects of row and column refinement remain unverified.
 
@@ -1590,9 +1602,10 @@ equivalence, and several datasets remain 1 to 4 AUC points behind.
 
 On the 38 TabArena classification tasks and one repeat of the official splits, four estimators rank
 second among seven evaluated configurations, behind TabICLv2, and have lower error than default
-CatBoost on 76\% of tasks. This harness comparison uses fixed defaults. Separately, the official TabArena-Lite pipeline places
-LightPFN 25th of 99 entries with Elo 1420 ($+67/-66$), above the GBDT point estimates, with overlapping
-intervals against tuned CatBoost. The full maintainer verification remains pending.
+CatBoost on 76\% of tasks. This harness comparison uses fixed defaults. On the official TabArena
+leaderboard, run and verified by the maintainers on all splits, LightPFN is 21st of 92 entries with Elo 1441
+($+69/-79$), above the point estimates of every tree-based entry, with intervals overlapping default CatBoost
+and the tuned gradient-boosting entries, and on the Pareto front of Elo against training and prediction time.
 Cache blocking and folded normalization improve CPU inference time by up to 4.1 times without changing
 predictions beyond floating-point rounding, and a Vulkan backend runs the same network on GPUs of any vendor.
 Competitive latency against boosted trees on an idle laptop CPU remains to be measured. Code, weights and the
