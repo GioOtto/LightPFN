@@ -36,9 +36,9 @@ proba = clf.predict_proba(X_test)
 
 - **Small.** 4,603,088 parameters, 18 MB of weights, designed for a commodity CPU. TabICLv2 has six
   times as many.
-- **Accurate without tuning.** On the official TabArena leaderboard (38 classification datasets) it ranks
-  21st of 92 methods, above every tree-based method, tuned and ensembled LightGBM, CatBoost and XGBoost
-  included; the intervals of the closest ones overlap with its own.
+- **Accurate without tuning.** On the official TabArena leaderboard (38 classification datasets) it ranked
+  21st of 92 methods as of 11 October 2026, above every tree-based method, tuned and ensembled LightGBM,
+  CatBoost and XGBoost included; the intervals of the closest ones overlap with its own.
 - **Any GPU.** CUDA and ROCm through PyTorch, and a Vulkan backend with its own WGSL compute kernels for
   AMD, Intel and NVIDIA GPUs on Linux and Windows, with no CUDA or ROCm install. On an RX 7900 XT it is
   6 to 10 times faster than a 16-thread CPU.
