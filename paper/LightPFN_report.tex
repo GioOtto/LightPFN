@@ -40,7 +40,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small\scshape A sling against giants}
-\fancyhead[R]{\small\scshape Technical report, version 1.1, October 2026}
+\fancyhead[R]{\small\scshape Technical report, version 1.2, October 2026}
 \fancyfoot[C]{\small\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 \fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\thepage}\renewcommand{\headrulewidth}{0pt}}
@@ -67,7 +67,7 @@
 \vspace{8pt}
 \rule{\linewidth}{0.6pt}\\[14pt]
 {\large Giorgio Ottoboni}\\[4pt]
-{\small Technical report, version 1.1, 12 October 2026}\\[2pt]
+{\small Technical report, version 1.2, 28 October 2026}\\[2pt]
 {\small\url{https://github.com/GioOtto/LightPFN}}
 \end{center}
 \vspace{6pt}
@@ -83,7 +83,7 @@ differences from default CatBoost have 95\% bootstrap intervals including zero a
 rows and, in a separate evaluation on larger datasets, at 10,000--100,000 rows. On 38 TabArena classification
 tasks, using the official splits of one repeat, four estimators rank second among seven evaluated
 configurations, behind TabICLv2, and yield lower error than default CatBoost on 76\% of tasks. On the
-official TabArena leaderboard, where the maintainers ran and verified it on all splits of the 38 classification
+official TabArena leaderboard as of 11 October 2026, where the maintainers ran and verified it on all splits of the 38 classification
 datasets, LightPFN ranks 21st of 92 methods with Elo 1441 ($+69/-79$). Its point estimate exceeds every
 tree-based entry, including tuned and ensembled ones, but its interval overlaps those of default CatBoost and
 of the tuned gradient-boosting entries. Cache blocking and folded normalization reduce CPU inference time by
@@ -97,78 +97,97 @@ priors $\cdot$ small models $\cdot$ CPU inference
 \section{Introduction}
 
 Gradient-boosted decision trees remain the default choice for tabular classification. They are
-widely used on CPUs and remain strong baselines after tuning. Prior-data fitted networks
+widely used on CPUs and remain strong baselines after tuning \cite{tabarena}. Prior-data fitted networks
 (PFNs) \cite{muller2022,hollmann2023} approach the problem from a different angle: a transformer is
 trained once on millions of synthetic datasets drawn from a prior over data-generating processes,
 and at test time it reads a labelled training set as context and predicts the test labels in a
-single forward pass. The network then approximates the posterior predictive distribution of the
-prior, so the quality of the prior and the capacity of the network determine what it can learn.
+single forward pass. It learns a predictive rule for new datasets, so the synthetic problems used
+for training and the capacity of the network determine what it can learn.
 TabPFN v2 \cite{hollmann2025}, TabICL \cite{qu2025} and their successors have shown that this
 recipe matches or exceeds tuned boosting on public benchmarks such as TabArena \cite{tabarena},
 with models ranging from a few million to several hundred million parameters, usually served on
 GPU.
 
-This report describes LightPFN, a model built under three constraints. The parameter budget stays
+This report describes LightPFN, for which we impose three design constraints. The parameter budget stays
 below five million, with the goal of keeping inference practical on a commodity CPU; a small parameter
-count does not by itself ensure latency comparable to boosted trees. Training uses synthetic data only,
+count does not by itself ensure prediction times comparable to boosted trees. Training uses synthetic data only,
 with no distillation and no weights or predictions of other tabular foundation models. Code, weights and the
 training pipeline are released under the Apache 2.0 license (\url{https://github.com/GioOtto/LightPFN}, package
 \texttt{LightPFN} on PyPI); dependency licenses still apply. Finally, after
 introducing the selection protocol, design choices use sets outside TabArena, which is reserved for
-evaluating the finalists. An earlier exploratory TabArena evaluation is disclosed in
-Section~\ref{sec:gbdt}.
+evaluating the finalists.
 
 The practical target is the way boosted trees are used day to day: with default settings, on a
-laptop. A model that matches or beats default CatBoost, LightGBM and XGBoost without tuning and without
+laptop. A model that matches or beats default CatBoost \cite{prokhorenkova2018}, LightGBM \cite{ke2017}
+and XGBoost \cite{chen2016} without tuning and without
 a GPU is useful even where tuned and ensembled boosting stays ahead, so we report the comparison with
 default tree ensembles alongside the selection sets.
 
 Our contributions are the following.
 \begin{enumerate}
   \item An adaptation and evaluation of refinement before compression \cite{causilo} under a
-  sub-five-million parameter budget (Section~\ref{sec:model}). Four temporary tokens mediate
-  within-row interactions, a second target-aware column stage revisits the context, and a separate
-  readout compresses each row. Removing one in-context block funds the added modules: the resulting
-  configuration improves held-out synthetic AUC by 0.56 points and external AUC by 0.51 points over
-  the baseline, with 4.60M rather than 4.78M parameters. These gains measure the complete configuration.
-  \item A rule prior (Section~\ref{sec:prior}) whose XOR and parity tasks are built from drivers
-  resampled within marginal partitions, so that the label is independent of every single feature.
+  sub-five-million parameter budget. The model learns interactions between features before compressing
+  each row into a fixed-size vector, improving accuracy over our baseline without increasing its size.
+  \item A rule prior that includes tasks whose labels depend on combinations of features while
+  remaining independent of each individual feature.
   Mixed at 10\% with a graph prior, it teaches interactions that the graph prior alone does not
   convey, provided the row stage has the capacity to combine features.
-  \item A selection protocol (Section~\ref{sec:eval}) based on paired bootstrap comparisons with
+  \item A selection protocol based on paired bootstrap comparisons with
   false discovery rate control over synthetic, probe and real datasets, together with a hardware
   anchor that measures how much a single-seed difference can move without any change in the recipe.
-  \item A training system (Section~\ref{sec:training}) that streams deterministic chunks of fresh
-  synthetic tasks from CPU workers to a data-parallel trainer, deletes each chunk once consumed,
-  and resumes after failures without breaking the learning-rate schedule.
-  \item A study of large tables (Section~\ref{sec:large}): learning curves on real datasets up to
-  32,000 training rows, and a long-context stage on synthetic tables of up to 60,000 rows, with
-  micro-batches sized by a measured memory model in which every row costs as much as about eight cells.
-  \item An inference path (Section~\ref{sec:inference}) that runs the cell stages in cache-sized pieces, folds
-  the normalization weights into the next layers and batches the estimators on the GPU: the same predictions,
-  up to floating-point rounding, at 1.1 to 4.1 times less CPU time and up to 2.3 times less memory, and an
-  evaluation of the final models on the 38 classification tasks of TabArena (Section~\ref{sec:tabarena}).
-  \item A Vulkan backend (Section~\ref{sec:vulkan}): eight compute kernels that run the network on GPUs of any
-  vendor on Linux and Windows without CUDA or ROCm, with the predictions of the PyTorch path up to rounding, released
-  with a scikit-learn package.
-  \item A negative result on categorical features (Section~\ref{sec:categorical}): neither inference-time encodings
-  nor a categorical adapter trained on the frozen network close the gap to CatBoost on high-cardinality columns,
-  because the prior lacks such columns.
+  \item A reproducible training and inference system, including fresh synthetic data generation,
+  reduced CPU time and memory use, and a Vulkan backend for GPUs from different vendors.
+  Evaluations on large tables, categorical features and TabArena establish both the gains and
+  the remaining limitations.
 \end{enumerate}
 
-\section{Background}
+Section~\ref{sec:background} introduces PFNs and the statistical and architectural concepts used below.
+Sections~\ref{sec:model}--\ref{sec:training} describe the model, synthetic generators and training procedure.
+Sections~\ref{sec:eval}--\ref{sec:large} present the selection protocol, ablations, comparisons with
+default tree ensembles and large-table experiments; the earlier exploratory TabArena evaluation is
+disclosed in Section~\ref{sec:gbdt}. Sections~\ref{sec:inference}--\ref{sec:categorical} cover inference
+(including Vulkan), the final TabArena evaluation and categorical features. The report closes with limitations
+and conclusions.
 
-\paragraph{Prior-data fitted networks.} Let $p(\mathcal{D})$ be a prior over datasets
-$\mathcal{D}=\{(x_i,y_i)\}_{i=1}^{n}$ with $x_i\in(\R\cup\{\varnothing\})^{m}$, where
-$\varnothing$ marks a missing value, and $y_i\in\{1,\dots,C\}$. A dataset is split into a context $\Dc$ of $n_c$ labelled rows and a query
-set $Q$ of $n_q$ rows. A PFN $q_\theta$ is trained to minimize
+\section{Background}
+\label{sec:background}
+
+\paragraph{Prior-data fitted networks.} A PFN learns a prediction procedure across simulated
+datasets rather than fitting a separate set of network weights to each new dataset. A synthetic
+generator defines which prediction problems it encounters during pretraining; this distribution
+over problems is the \emph{prior}. At deployment, labelled rows supply evidence about the new
+problem, while the pretrained network weights remain fixed \cite{muller2022}.
+
+For one dataset, write $\mathcal{D}=\{(x_i,y_i)\}_{i=1}^{n}$. There are $n$ rows, $m$ features
+and $C$ classes; $x_i\in(\R\cup\{\varnothing\})^{m}$ is the feature vector of row $i$, with
+$\varnothing$ marking a missing value, and $y_i\in\{1,\dots,C\}$ is its class label.
+The \emph{context} $\Dc$ contains $n_c$ labelled rows. The remaining $n_q$ rows, indexed by $Q$,
+are \emph{queries}: their features are supplied to the network, but their labels are withheld and
+used to score its predictions. Thus $n=n_c+n_q$. A task is one such context/query prediction problem.
+Let $p(\mathcal{D})$ denote the distribution over datasets induced by the generator. The PFN
+$q_\theta(y\mid x,\Dc)$ returns class probabilities, with $\theta$ denoting its learned network
+parameters. Pretraining minimizes the expected negative log probability of the withheld labels:
 \begin{equation}
 \mathcal{L}(\theta)=\E_{\mathcal{D}\sim p(\mathcal{D})}\Big[-\frac{1}{n_q}\sum_{i\in Q}
-\log q_\theta\big(y_i\mid x_i,\Dc\big)\Big],
+\log q_\theta\big(y_i\mid x_i,\Dc\big)\Big].
 \label{eq:pfn}
 \end{equation}
-whose minimizer over all functions is the posterior predictive distribution
-$p(y\mid x,\Dc)=\int p(y\mid x,\phi)\,p(\phi\mid\Dc)\,d\phi$ of the prior \cite{muller2022}.
+The expectation includes the context/query split. Over unrestricted conditional predictors, the
+population minimizer is $p(y\mid x,\Dc)$ under this task distribution \cite{muller2022,nagler2023}.
+To give its Bayesian interpretation, let $\phi\sim p(\phi)$ describe a data-generating mechanism
+(for example its graph, functions and noise parameters), distinct from the network weights $\theta$.
+If rows are conditionally independent and identically distributed given $\phi$, with a
+context/query split independent of their values, then
+\begin{equation}
+p(y\mid x,\Dc)=\int p(y\mid x,\phi)\,p(\phi\mid x,\Dc)\,d\phi.
+\end{equation}
+This \emph{posterior predictive distribution} averages predictions over mechanisms compatible with
+the observed context and query features. The familiar form with $p(\phi\mid\Dc)$ requires that
+observing $x$ supply no further information about the conditional response model, as when the
+prior over that model is independent of the feature distribution \cite{nagler2023}. We do not
+assume this factorization for the graph generators. A finite trained PFN approximates the
+predictive rule induced by its actual generator, including filtering and preprocessing; it does
+not explicitly compute this integral, nor is exact Bayesian inference guaranteed on real datasets.
 
 \paragraph{Three-stage architectures.} TabICL \cite{qu2025}, its successor TabICLv2
 \cite{tabiclv2} and TabPFN-3 \cite{tabpfn3} process a table in three stages: an embedding of every
@@ -181,8 +200,15 @@ of the feature count. Causilo \cite{causilo} introduces row refinement, a second
 separate row readout through fixed-size summaries. LightPFN adapts this pattern: its row attention
 is linear in $m$, while the quadratic context term in ICL remains.
 
-\paragraph{Priors.} TabPFN and TabICL draw tasks from structural causal models with random graphs
-and random node functions. Mitra \cite{mitra} showed that adding tasks labelled by fitted tree
+\paragraph{Priors and structural causal models.} TabPFN and TabICL draw tasks from structural
+causal models (SCMs) \cite{hollmann2023,qu2025,tabiclv2}. An SCM specifies variables as functions
+of their parent variables and noise on a directed acyclic graph (DAG), a directed graph with no
+directed cycles. To simulate a table, one samples a graph and node functions, then generates rows
+by evaluating the nodes in an order that respects the arrows. Selected nodes supply the observed
+features and target. Resampling the graph and functions between tasks induces a distribution over
+prediction problems. Here these graphs generate synthetic dependencies; they are not graphs
+inferred from a real dataset. Section~\ref{sec:prior} distinguishes this inherited graph generator
+from our rule-based labelling procedure. Mitra \cite{mitra} showed that adding tasks labelled by fitted tree
 ensembles to the mixture improves real-data performance. LimiX \cite{limix} trains on masked joint
 modelling, predicting held-out cells as well as labels. Our work uses ideas from these papers and
 none of their weights.
@@ -190,9 +216,19 @@ none of their weights.
 \section{Model}
 \label{sec:model}
 
-We describe B4, the architecture selected for the final run. For one task, $n_c$ labelled context
+We describe the architecture of LightPFN selected for the final run, denoted B4 in the ablations.
+A0 denotes our baseline: one column stage, full within-row self-attention without refinement,
+and eight ICL blocks. For one task, $n_c$ labelled context
 rows and $n_q$ unlabelled query rows share $m$ features, with $n=n_c+n_q$. Cell states have width
-$d_e=64$ until row compression; row states then have width $d_r=256$. The computation follows
+$d_e=64$ until row compression; row states then have width $d_r=256$.
+
+Figure~\ref{fig:arch} provides a reading guide. Panel 1 is the input table $X$, with labels available
+only for the context. Panels 2--5 replace each scalar cell with a vector, compare it with the labelled
+cells in its column, exchange information between features in each row, and revisit the columns.
+Panel 6 compresses each row into one vector. Panel 7 compares query rows with the labelled context,
+and panel 8 turns these comparisons into class probabilities. The corresponding operators are
+$\Phi$, $\mathcal{C}_1$, $\mathcal{F}$, $\mathcal{C}_2$, $\mathcal{P}$, $\mathcal{I}$ and
+$\mathcal{D}$, respectively; $P\in\R^{n_q\times C}$ collects the predicted probabilities:
 \begin{equation}
 X\ \xrightarrow{\ \Phi\ }\ E^{(0)}
 \ \xrightarrow{\ \mathcal{C}_1\ }\ E^{(1)}
@@ -230,24 +266,37 @@ unrotated. The column pattern is used twice with independent parameters.}
 \end{figure}
 
 \subsection{Attention block}
-Attention modules use the same pre-norm residual block structure, with their own parameters.
+Attention lets each input vector retrieve a weighted average of other vectors. A \emph{query}
+vector is compared with source \emph{keys}; a softmax turns their similarity scores into positive
+weights summing to one, which are applied to source \emph{values}. These attention queries are
+internal vectors, distinct from the unlabelled query rows of a task. Multiple heads learn separate
+comparisons and concatenate their outputs. A token is one vector in such a sequence; learned
+summary tokens provide a fixed number of vectors through which a variable-sized set can exchange
+information. Figure~\ref{fig:arch-details} shows how these operations are used in LightPFN.
+
+Attention modules use the same pre-norm residual block structure, with their own parameters:
+inputs are normalized before each transformation, and its output is added to the input.
+
+\begin{samepage}
 Let $X\in\R^{L_q\times d}$ be the query sequence and $Y\in\R^{L_k\times d}$ the source sequence.
+Here $X,Y$ are generic block inputs, not the raw table and labels; $L_q,L_k$ are sequence lengths,
+$d$ is the vector width and $d_h$ the width of head $h$.
 Each head projects separately normalized states into queries, keys and values, using the
 output-by-input weight convention of the implementation:
-\begin{equation}
-\begin{aligned}
-Q_h&=\RMS_Q(X)W_{Q,h}^{\top},\\
-K_h&=\RMS_{KV}(Y)W_{K,h}^{\top},\qquad
-V_h=\RMS_{KV}(Y)W_{V,h}^{\top}.
-\end{aligned}
-\end{equation}
 \begin{align}
+Q_h&=\RMS_Q(X)W_{Q,h}^{\top},\nonumber\\
+K_h&=\RMS_{KV}(Y)W_{K,h}^{\top},\qquad
+V_h=\RMS_{KV}(Y)W_{V,h}^{\top},
+\\
 \widetilde X&=X+\operatorname{Concat}_h
  \left[\operatorname{softmax}\!\left(\frac{\widehat Q_h\widehat K_h^\top}{\sqrt{d_h}}+M\right)V_h\right]W_O^{\top},\\
 \Block(X,Y)&=\widetilde X+\mathrm{GELU}\big(\RMS_{FF}(\widetilde X)W_1^{\top}\big)W_2^{\top}.
 \label{eq:block}
 \end{align}
-Here $M$ is an additive mask with zero on allowed keys and $-\infty$ on excluded keys, and
+\end{samepage}
+Here RMSNorm normalizes by the root mean square of a vector with a learned scale, GELU is a
+smooth nonlinear activation, and the $W$ matrices are learned linear projections.
+$M$ is an additive mask with zero on allowed keys and $-\infty$ on excluded keys, and
 $W_1\in\R^{2d\times d}$. Ordinarily $\widehat Q_h=Q_h$ and $\widehat K_h=K_h$; positional rotation
 or query scaling modifies these projections where specified below. We write $\Block^{Q\rho}$
 when rotary positions act on cell queries, $\Block^{K\rho}$ when they act on cell keys, and
@@ -257,15 +306,22 @@ zero, so each block is the identity at initialization. Cached source keys and va
 once and reused for subsequent queries.
 
 \subsection{Cell embedding}
+The cell embedding (panel 2 of Figure~\ref{fig:arch}, top left of Figure~\ref{fig:arch-details})
+converts each scalar entry $x_{ij}$, row $i$ and column $j$, into a 64-dimensional vector.
 Statistics are computed on the context rows of each column $j$, ignoring missing values: the mean
 $\mu_j$, the standard deviation $\sigma_j$ and the sorted values. A cell is described by a
-soft-clipped z-score, a mid-rank under the empirical CDF of the context, and a missingness flag:
+soft-clipped z-score, a mid-rank under the empirical cumulative distribution function (CDF) of the
+context, and a missingness flag. Let $I_j$ index the observed context values of column $j$ and
+$N_j=|I_j|$. For $N_j>0$ and an observed cell,
 \begin{equation}
+\begin{aligned}
 z_{ij}=5\tanh\!\Big(\frac{x_{ij}-\mu_j}{5(\sigma_j+\epsilon)}\Big),\qquad
-r_{ij}=\frac{\#\{x_{lj}<x_{ij}\}+\#\{x_{lj}\le x_{ij}\}}{2\,N_j},\qquad
-\nu_{ij}=\mathbf{1}[x_{ij}\text{ missing}],
+\nu_{ij}=\mathbf{1}[x_{ij}\text{ missing}],\\
+r_{ij}=\frac{\#\{\ell\in I_j:x_{\ell j}<x_{ij}\}+\#\{\ell\in I_j:x_{\ell j}\le x_{ij}\}}{2\,N_j}.
+\end{aligned}
 \end{equation}
-where counts run over the $N_j$ observed context values; missing cells get $z=0$ and $r=1/2$.
+Here $\#$ counts set elements, $\mathbf{1}$ is an indicator and $\epsilon>0$ stabilizes division;
+missing cells get $z_{ij}=0$, $r_{ij}=1/2$ and $\nu_{ij}=1$.
 The standard deviation uses denominator $\max(N_j-1,1)$; constant columns receive $z=0$, and
 entirely unobserved columns receive $r=1/2$. The mean and standard deviation are conventional
 sample statistics: soft clipping bounds the normalized values but does not make these estimators robust.
@@ -281,13 +337,19 @@ e^{\mathrm{meta}}_{ij}&=W_m\psi_{ij},\qquad
  (\cos(2^k\pi r_{i,j+o}))_{o,k}\big]\in\R^{30},\\
 e_{ij}&=\LN\big(e^{\mathrm{val}}_{ij}+e^{\mathrm{meta}}_{ij}\big)\in\R^{64}.
 \end{align}
-Here $o\in\{0,1,3\}$ and $k=0,\dots,3$. Offsets wrap modulo the true feature count; padding is excluded from feature attention. All
+Here LN is layer normalization, $W_f,W_m$ are learned projections, $o\in\{0,1,3\}$ and
+$k=0,\dots,3$; parentheses with subscript $o$ or $(o,k)$ collect the corresponding entries into
+a vector, and semicolons denote concatenation. Offsets wrap modulo the true feature count;
+padding is excluded from feature attention. All
 statistics are fitted to the context and reused for queries. Categorical columns enter as ordinal codes of
 their categories, through the same embedding as numeric columns; the network has no categorical-specific
 encoding (Section~\ref{sec:categorical}).
 
 \subsection{Column encoding}
 The first column operator $\mathcal{C}_1$ uses induced set attention blocks (ISAB) \cite{lee2019}.
+In panel 3 of Figure~\ref{fig:arch} and the top-centre panel of Figure~\ref{fig:arch-details},
+\emph{gather} summarizes labelled cells into a fixed set of inducing tokens, and \emph{broadcast}
+lets each context or query cell read those summaries.
 It acts independently on the row sequence of each column, with parameters shared across columns.
 Context cells start from $E^{(0)}_{ij}+u^{(1)}_{y_i}$; query cells start from $E^{(0)}_{ij}$.
 Label embeddings have orthonormal initialization and are subsequently learned without an
@@ -304,7 +366,8 @@ column distribution, with attention cost $O(nmk)$ at fixed depth and width.
 
 \subsection{Row refinement}
 The operator $\mathcal{F}$ exchanges information across the feature axis while retaining all cell
-states. It follows the summary-mediated refinement of Causilo \cite{causilo}. Each row starts with
+states (panel 4 of Figure~\ref{fig:arch}, top right of Figure~\ref{fig:arch-details}).
+It follows the summary-mediated refinement of Causilo \cite{causilo}. Each row starts with
 its cells $c^{(0)}\in\R^{m\times64}$ and $K=4$ learned temporary tokens
 $S^{(0)}\in\R^{K\times64}$, initialized identically across rows. For $t=0,\dots,R-1$,
 \begin{align}
@@ -324,7 +387,7 @@ for fixed $R$ and $K$, compared with $O(nm^2)$ for the baseline's full row self-
 
 \subsection{Column refinement}
 The operator $\mathcal{C}_2$ applies the same two-layer induced attention pattern as
-$\mathcal{C}_1$, with independent inducing tokens, projections, feed-forward blocks and label
+$\mathcal{C}_1$ (panel 5 of Figure~\ref{fig:arch}), with independent inducing tokens, projections, feed-forward blocks and label
 embeddings $u^{(2)}_y$. Its context input is $\bar E^{\mathrm{ctx}}_{ij}+u^{(2)}_{y_i}$ and its
 query input is $\bar E^q_{ij}$. The context-only gather now reads cells that already encode
 within-row feature interactions. The broadcast compares each such cell with this enriched column
@@ -332,7 +395,7 @@ memory before any feature information is pooled away. The second stage has its o
 and values, and the same $O(nmk)$ attention cost as the first.
 
 \subsection{Row compression}
-The pooling operator $\mathcal{P}$ uses $K_p=4$ learned readout tokens
+The pooling operator $\mathcal{P}$ (panel 6 of Figure~\ref{fig:arch}) uses $K_p=4$ learned readout tokens
 $s^{(0)}\in\R^{K_p\times64}$, separate from the temporary tokens of $\mathcal{F}$. For each row,
 three attention blocks update these readout tokens while holding the refined cells $c^\star$ fixed:
 \begin{equation}
@@ -341,11 +404,13 @@ r_i=\mathrm{vec}\big(s^{(3)}\big)\in\R^{256}.
 \end{equation}
 Only the cell keys receive rotary positions; summary keys and all values remain unrotated.
 The attention cost is $O(nK_p(m+K_p))$ at fixed depth. This operation removes the feature axis
-and supplies a fixed-width representation to ICL. B3 ablated this pooling in place of full row
+and supplies a fixed-width representation to ICL. B3, a pooling-only variant of A0, ablated this pooling in place of full row
 self-attention: its accuracy differences from A0 were inconclusive, and its training time was 70\%
 of A0's. This supports it as an efficient readout, without establishing statistical equivalence.
 
 \subsection{In-context learning stage}
+At this stage each row is one vector (panel 7 of Figure~\ref{fig:arch}, bottom left of
+Figure~\ref{fig:arch-details}); attention now compares rows rather than individual cells.
 Context rows receive a row-level label embedding $v_{y_i}\in\R^{256}$ and are preceded by 16 learned
 thinking rows $T$, which act as registers \cite{darcet2024}. With $Z^{(0)}=[\,T;\ R_{\mathrm{ctx}}+V_{y}\,]$
 and query rows $U^{(0)}=R_{q}$, each of the $L=7$ blocks computes
@@ -365,10 +430,12 @@ q\leftarrow q\odot\beta(\log\max(N,2))\odot\big(1+\tanh\varphi(q)\big),
 \label{eq:query-scaling}
 \end{equation}
 where $\beta$ and $\varphi$ are learned MLPs initialized to make scaling the identity, and
-$N=n_c+16$ in ICL. A final RMS normalization is applied to context and query row states.
+$N=n_c+16$ in ICL. Here $q$ is a projected attention-query vector and $\odot$ denotes elementwise
+multiplication; MLP means multilayer perceptron. A final RMS normalization is applied to context and query row states.
 
 \subsection{Retrieval decoder}
-The readout is an attention-weighted vote of the context labels. With $H=4$ heads,
+The readout is an attention-weighted vote of the context labels (panel 8 of Figure~\ref{fig:arch},
+bottom right of Figure~\ref{fig:arch-details}). With $H=4$ heads,
 queries from the final query states $u_i$ and keys from the final context states $z_j$,
 \begin{equation}
 \begin{aligned}
@@ -377,7 +444,8 @@ p^{\mathrm{vote}}_{ic}&=\frac{1}{H}\sum_{h=1}^{H}\sum_{j\in\Dc}
 \alpha^{h}_{ij}\,\mathbf{1}[y_j=c].
 \end{aligned}
 \end{equation}
-Here $\widehat q_i^h$ is $W_q^h u_i$ after key-count scaling with $N=n_c$; the decoder has its
+Here $\langle a,b\rangle=a^\top b$ is the Euclidean inner product, $c$ indexes a class, and
+$\widehat q_i^h$ is $W_q^h u_i$ after key-count scaling with $N=n_c$; the decoder has its
 own scaling parameters. One-hot context labels supply the values, and the thinking rows are
 excluded. The decoder returns logits
 \begin{equation}
@@ -388,7 +456,9 @@ q_\theta(y=c\mid x_i,\Dc)&=\operatorname{softmax}_c(\ell_i)_c.
 \end{aligned}
 \end{equation}
 The smoothing bounds the loss of a confident mistake; the final softmax renormalizes the smoothed
-votes. No learned output vector is needed per class. Although the attention value width is 64,
+votes across classes. In $\operatorname{softmax}_c(\ell_i)_c$, the subscript on the operator denotes
+normalization over classes and the final subscript selects class $c$. No learned output vector is
+needed per class. Although the attention value width is 64,
 the complete model's label-embedding interface supports at most 16 classes; the training prior
 contains 2--10 classes, so support for 11--16 is a capacity limit rather than an evaluated guarantee.
 
@@ -458,20 +528,37 @@ patterns. B4 is 173,984 parameters smaller than A0.}
 \section{Synthetic priors}
 \label{sec:prior}
 
+This section specifies the simulation procedure that defines $p(\mathcal{D})$ in
+Eq.~\eqref{eq:pfn}. For each task we sample its dimensions and class count, generate features and
+labels, and split the rows into labelled context and withheld queries. Training the network of
+Section~\ref{sec:model} on many such tasks teaches it to predict from a new context.
+The main pretraining mixture uses 90\% graph v3 tasks and 10\% rule tasks.
+The graph generator is inherited from TabICLv2 \cite{tabiclv2}; our changes concern reproducible
+sampling, task geometry, the v4 variant studied in ablations, and the rule-based labelling procedure.
+Thus the SCM approach itself is not a new contribution of this work.
+
 \subsection{Task geometry}
+By \emph{geometry} we mean the task dimensions and context/query proportions.
 Tasks are generated in groups of eight that share their shape, which keeps padding low during
-training. The number of rows is log-uniform, $n\sim\mathrm{LogU}(256,2048)$, and the context
+training. Padding fills variable-sized tables to a common batch shape; reducing it avoids unused
+computation. The number of rows is log-uniform, $n\sim\mathrm{LogU}(256,2048)$, and the context
 fraction is uniform in $[0.3,0.9]$. The number of features follows the ratio $m/n$, drawn
 log-uniformly within one of three bands, $[0.01,0.06]$ with probability 0.7, $[0.06,0.15]$ with
 probability 0.2 and $[0.15,0.5]$ with probability 0.1, then rounded and clipped to $[2,100]$. A task
 is binary with probability $p_{\mathrm{bin}}$ and otherwise has $C\sim\mathcal{U}\{3,\dots,10\}$
-classes. Half of the tasks are resampled to an imbalanced class distribution, with a binary
+classes. Here $\mathrm{LogU}(a,b)$ means uniform sampling of the logarithm between $\log a$ and
+$\log b$, $\mathcal{U}\{3,\dots,10\}$ is discrete uniform sampling, and $p_{\mathrm{bin}}$ is the
+probability of a binary task. The 2--10 training classes are distinct from the 16 label slots
+available in the architecture. Half of the tasks are resampled to an imbalanced class distribution, with a binary
 minority share drawn from $\mathrm{LogU}(0.01,0.5)$ and multiclass proportions from a Dirichlet
 distribution. Every random draw is seeded by its coordinates (prior, shard, group, task, phase) through a
 hierarchical seed sequence, so shards are byte-identical for any number of worker processes.
 
 \subsection{Graph prior}
-The graph prior reproduces the structural causal model of TabICLv2 \cite{tabiclv2} deterministically.
+The \emph{graph prior} is a distribution over tasks whose features and target are generated from
+a shared random SCM, as introduced in Section~\ref{sec:background}.
+Our implementation uses the graph sampler, node functions and converters of TabICLv2
+\cite{tabiclv2}, with deterministic seeding and our own retry and shape policies.
 A random directed acyclic graph is sampled; each node applies a random function to its parents,
 chosen among MLPs, random oblivious trees, discretizations, linear and quadratic maps, Gaussian
 processes with product kernels and products, with sum, product, max or log-sum-exp aggregation and
@@ -484,8 +571,10 @@ splits numeric targets at quantiles for part of the multiclass tasks and reads t
 final node in 90\% of the drafts.
 
 \subsection{Rule prior}
-The rule prior draws features from graph v4 and assigns labels with a known oracle over one to four
-observed driver columns. Its families and probabilities are XOR (25\%), parity (20\%), shallow trees
+The \emph{rule prior} is a distribution over tasks in which an explicit sampled rule supplies the
+target. It draws features from graph v4 and assigns labels with a known oracle (the label-generating
+rule) over one to four observed driver columns. Unlike the graph prior, the target relationship is
+specified directly on these observed columns. Its families and probabilities are XOR (25\%), parity (20\%), shallow trees
 (20\%), lookup tables (10\%), products (10\%), AND (7.5\%) and OR (7.5\%). For binary XOR and parity,
 the drivers are resampled independently within the partitions of their marginal distributions, with
 source thresholds $\tau_k$ at quantiles between 30\% and 70\%, and the label is
@@ -516,7 +605,10 @@ each class once.}
 
 \subsection{Load-time augmentation}
 When a task is loaded for training, its real features are permuted, and 30\% of the tasks receive
-missing values. The mechanism is drawn uniformly among MCAR, MAR and MNAR, a fraction
+missing values. The mechanism is drawn uniformly among missing completely at random (MCAR),
+missing at random (MAR), and missing not at random (MNAR). Respectively, the missingness probability
+is independent of values, depends on another feature, or depends on the value being hidden.
+A fraction
 $\mathcal{U}[0.1,1]$ of the columns is affected, and each affected column $j$ has a rate
 $\rho_j\sim\mathrm{LogU}(0.01,0.5)$. Under MCAR a cell is missing with probability $\rho_j$. Under MAR
 and MNAR the probability is $2\rho_j\,s_i$, where $s_i\in[0,1]$ is the normalized mid-rank of
@@ -528,14 +620,17 @@ At least two observed context cells are kept in every column.
 
 \subsection{Objective and optimization}
 Each step draws a batch $\mathcal{B}$ of tasks and minimizes the empirical version of
-Eq.~\eqref{eq:pfn}, with logits of classes absent from a task masked out:
+Eq.~\eqref{eq:pfn}, with logits of classes absent from a task masked out. In this expression $t$
+indexes tasks, and $n_q^t$, $Q_t$ and $\mathcal{D}^t_{\mathrm{ctx}}$ are their query counts, query
+index sets and contexts:
 \begin{equation}
 \hat{\mathcal{L}}(\theta)=\frac{1}{|\mathcal{B}|}\sum_{t\in\mathcal{B}}\frac{1}{n_q^{t}}
 \sum_{i\in Q_t}-\log q_\theta\big(y_i\mid x_i,\mathcal{D}^{t}_{\mathrm{ctx}}\big).
 \end{equation}
 The two-dimensional weight matrices of all attention blocks are optimized with Muon
 \cite{jordan2024}, the remaining parameters with AdamW \cite{loshchilov2019}
-($\beta_1=0.9$, $\beta_2=0.98$, weight decay $\lambda=0.01$). For a weight $W\in\R^{a\times b}$ with
+($\beta_1=0.9$, $\beta_2=0.98$, weight decay $\lambda=0.01$). In the optimizer equations below,
+$t$ indexes optimization steps. For a weight $W\in\R^{a\times b}$ with
 gradient $G_t$, Muon orthogonalizes the Nesterov momentum with five Newton-Schulz iterations and
 rescales the update to the root-mean-square magnitude of AdamW \cite{liu2025muon}:
 \begin{align}
@@ -639,13 +734,17 @@ multiclass tasks.
 
 \paragraph{Paired statistics.} For two models $A$ and $B$ evaluated on the same $n$ tasks with scores
 $a_t$ and $b_t$, we report $\Delta=\frac{1}{n}\sum_t(a_t-b_t)$ with a percentile interval from
-$B=20{,}000$ bootstrap resamples of the tasks, and the two-sided p-value
+$B=20{,}000$ bootstrap resamples of the tasks. Each resample draws $n$ task indices with replacement
+and uses the same indices for both models; $\Delta_b^*$ is the mean difference in resample $b$.
+We report the two-sided p-value
 \begin{equation}
 p=\frac{1+\#\{b:\ |\Delta^{*}_b-\Delta|\ge|\Delta|\}}{B+1}.
 \end{equation}
 For D2, with five seeds per probe, the bootstrap enumerates all resamples and a sign-flip test gives
 the p-value. Within every domain and metric, p-values are adjusted with the Benjamini-Hochberg
-procedure \cite{benjamini1995}. All ablations use a single training seed, so the intervals capture
+procedure \cite{benjamini1995}, a multiple-testing adjustment targeting the expected proportion of
+false discoveries among rejected hypotheses, rather than the error rate of each test separately.
+All ablations use a single training seed, so the intervals capture
 task sampling and leave out the variance across training runs; Section~\ref{sec:anchor} estimates the
 latter through one hardware anchor rather than a repeated-seed variance estimate. An interval that includes
 zero does not establish equivalence. Unless otherwise stated,
@@ -1704,6 +1803,9 @@ framework for attention-based permutation-invariant neural networks. In \emph{IC
 
 \bibitem{muller2022} S.~M\"uller, N.~Hollmann, S.~Pineda~Arango, J.~Grabocka, and F.~Hutter.
 Transformers can do Bayesian inference. In \emph{ICLR}, 2022.
+
+\bibitem{nagler2023} T.~Nagler. Statistical foundations of prior-data fitted networks. In
+\emph{ICML}, PMLR 202:25660--25676, 2023. \url{https://proceedings.mlr.press/v202/nagler23a.html}.
 
 \bibitem{kumo} NVIDIA. Kumo Tabular, reference implementation in structured-data-models, 2026.
 \url{https://github.com/NVIDIA/structured-data-models}.
