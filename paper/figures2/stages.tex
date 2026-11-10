@@ -1,0 +1,54 @@
+% LightPFN 1.5 training pipeline: five stages and the gates. Sources: runs/v15_5m_20261106/PROTOCOL.md,
+% runs/remote/stage2_box_20261108/HANDOFF.md, runs/cls_wide_20261109/PROTOCOL.md, runs/reg_wide_20261109/RESULTS.md.
+\begin{tikzpicture}[x=1cm, y=1cm]
+\tikzset{
+  st/.style={draw=#1!65, fill=#1!10, rounded corners=3pt, line width=0.6pt, align=left, inner sep=3pt,
+             text width=3.55cm, font=\fontsize{6.6}{8}\selectfont, minimum height=2.15cm, anchor=north west},
+  ckpt/.style={draw=#1!80!black, fill=#1!25, rounded corners=6pt, font=\bfseries\fontsize{6.8}{8}\selectfont,
+               align=center, inner sep=3pt, line width=0.7pt},
+  gate/.style={draw=black!55, fill=white, rounded corners=2pt, inner sep=1.2pt, font=\fontsize{5.8}{6.5}\selectfont,
+               align=center},
+  lab/.style={font=\fontsize{6}{7}\selectfont, text=black!65, align=center},
+}
+\colorlet{ccls}{blue!70!black}\colorlet{creg}{teal!70!black}\colorlet{cfail}{red!60!black}
+
+\node[st=ccls] (main) at (0,4.6) {\textbf{1\ \ cls\_main} \hfill 12.51 h\\[1pt]
+  random init, B4 $+$ categorical adapter\\120,000 steps $\times$ 64 tasks\\
+  256--2,048 rows, $\le100$ features\\90\% graph v4 $+$ 10\% rule, $p_{\mathrm{bin}}=.55$\\
+  LR $10^{-3}\!\to\!10^{-4}$, mask-drop .25};
+\node[st=ccls] (long) at (4.25,4.6) {\textbf{2\ \ cls\_long} \hfill 7.08 h\\[1pt]
+  from cls\_main 120k (optimizer kept)\\15,000 steps, 16 task groups\\
+  256--60,000 rows, $n(m{+}10)\le1.38{\times}10^6$\\groups 15\% s1b, 35\% s2cap, 50\% s4cap\\
+  LR $10^{-4}\!\to\!10^{-5}$};
+\node[st=ccls] (wide) at (8.5,4.6) {\textbf{3\ \ cls\_wide} \hfill $\approx$5.0 h\\[1pt]
+  from cls\_long 15k (step reset)\\8,500 steps, 16 task groups\\
+  50\% s2w: 1,024--10,240 rows,\\\quad 64--500 features (new)\\
+  50\% s1b/s2cap/s4cap; LR $10^{-4}\!\to\!10^{-5}$};
+\node[ckpt=ccls] (fc) at (14.55,3.55) {final\\classifier\\4,609,472};
+
+\node[st=creg] (rmain) at (4.25,1.95) {\textbf{4\ \ reg\_main} \hfill 4.61 h\\[1pt]
+  init from cls\_long 15k EMA $+$ head\\39,063 steps $\times$ 64 tasks\\
+  r2 prior on graph v3 (filter, noise,\\\quad tails, discrete), mask-drop 0\\
+  LR $10^{-3}\!\to\!10^{-4}$};
+\node[st=creg] (rlong) at (8.5,1.95) {\textbf{5\ \ reg\_long} \hfill 2.46 h\\[1pt]
+  from reg\_main 39,063\\5,000 steps, 16 task groups\\
+  r2 s1b/s2cap/s4cap 15/35/50\%,\\\quad up to 60,000 rows\\
+  LR $10^{-4}\!\to\!10^{-5}$};
+\node[ckpt=creg] (fr) at (14.55,0.9) {final\\regressor\\4,772,519};
+
+\draw[bigflow] (main.east |- 0,3.55) -- (long.west |- 0,3.55);
+\draw[bigflow] (long.east |- 0,3.55) -- (wide.west |- 0,3.55);
+\draw[bigflow] (wide.east |- 0,3.55) -- node[gate, above=1pt] {gate\\passed} (fc.west);
+\draw[bigflow] ($(long.south)+(0,0)$) -- (rmain.north);
+\draw[bigflow] (rmain.east |- 0,0.9) -- (rlong.west |- 0,0.9);
+\draw[bigflow] (rlong.east |- 0,0.9) -- (fr.west);
+\node[lab, anchor=south] at ($(main.north)+(0,0.02)$) {30k gate vs paired B4: passed};
+\node[lab, anchor=south] at ($(wide.north)+(0,0.02)$) {gate fixed in advance (D3-wide, D3, D1, Dcat, D4)};
+
+% rejected regression wide fine-tune
+\node[draw=cfail!70, dashed, rounded corners=3pt, fill=cfail!4, font=\fontsize{6.4}{7.6}\selectfont, align=left,
+      text width=3.4cm, anchor=north west, inner sep=3pt] (rw) at (0,1.95) {\textbf{reg\_wide (rejected)}\\[1pt]
+  5,000 steps from reg\_long, wider r2\\pools; D3-reg-wide RMSE $+1.85\%$\\$[+0.59,+3.47]$: gate failed,\\released regressor unchanged};
+\draw[-{Stealth[length=1.8mm]}, cfail!70, dashed, line width=0.7pt] (rlong.south) -- ++(0,-0.25) -| (rw.south);
+\node[lab, anchor=north] at (7.5,-0.42) {4$\times$ RTX 5090 per stage; hours are logged process time (start to exit; cls\_wide: step time); evaluations and pool generation excluded};
+\end{tikzpicture}

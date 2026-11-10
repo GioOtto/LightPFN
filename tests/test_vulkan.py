@@ -4,6 +4,7 @@ Use ``-s`` to print the largest absolute errors for each numerical test.
 No test selects a GPU for the device resolver: its availability checks are mocked.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -99,8 +100,16 @@ def cache_parity(net, ctx, ref, check, atol=1e-5):
     H, hd = ref.dec_k.shape[1], ref.dec_k.shape[-1]
     keys = net.eng.download(ctx.dec_k, (B, ctx.n, H, hd))
     check(torch.from_numpy(keys).transpose(1, 2), ref.dec_k, "decoder_cache", atol=atol)
-    check(net.eng.download(ctx.onehot, (B, ctx.n, net.dec_hd)),
-          torch.nn.functional.one_hot(ref.y, net.dec_hd).float(), "onehot", atol=0)
+    if ref.extra.get("regression"):
+        assert ctx.extra.get("regression") is True
+        z = ref.y.float()
+        dec_v = torch.nn.functional.pad(torch.stack([z, z * z], -1), (0, net.dec_hd - 2))
+        check(net.eng.download(ctx.onehot, (B, ctx.n, net.dec_hd)), dec_v, "moments_v", atol=1e-6)
+        torch.testing.assert_close(ctx.extra["mean"], ref.extra["mean"], rtol=0, atol=0)
+        torch.testing.assert_close(ctx.extra["scale"], ref.extra["scale"], rtol=0, atol=0)
+    else:
+        check(net.eng.download(ctx.onehot, (B, ctx.n, net.dec_hd)),
+              torch.nn.functional.one_hot(ref.y, net.dec_hd).float(), "onehot", atol=0)
     for key in ref.stats:
         torch.testing.assert_close(ctx.stats[key], ref.stats[key], rtol=0, atol=0, equal_nan=True)
 
@@ -640,3 +649,322 @@ def test_engine_uses_device_limits(monkeypatch):
     assert eng.submit_ops * eng.param_slot <= eng.max_binding
     with pytest.raises(MemoryError):
         eng.empty(16385)
+
+
+# v1.5 categorical adapter and regression head ---------------------------------------------------
+
+SMALL_V15 = dict(
+    col_dim=32, col_heads=4, row_heads=4, n_cls=2, icl_heads=4, decoder_heads=4,
+    col_blocks=1, row_blocks=1, icl_blocks=2, n_inducing=4, n_thinking=4,
+    row_refine=True, row_mode="summary", cat_adapter=True,
+)
+# Optional local final checkpoints; never downloaded by the tests.
+_CHECKPOINTS = Path(__file__).resolve().parent / "checkpoints"
+CLS_V15_CKPT = Path(os.environ.get("LIGHTPFN_TEST_CLASSIFIER_CHECKPOINT", _CHECKPOINTS / "classifier"))
+REG_V15_CKPT = Path(os.environ.get("LIGHTPFN_TEST_REGRESSOR_CHECKPOINT", _CHECKPOINTS / "regressor"))
+
+
+def mixed_task(B=2, n=23, M=9, C=4, seed=31):
+    """Mixed numeric + categorical task: binary, medium (7), high (50) cardinalities, unseen test levels,
+    missing values in numeric and categorical columns, and an all-missing categorical column."""
+    g = torch.Generator().manual_seed(seed)
+    m = 6
+    X = torch.randn(B, n + M, m, generator=g)
+    X[:, :, 1] = torch.randint(0, 2, (B, n + M), generator=g).float()
+    X[:, :n, 2] = torch.randint(0, 7, (B, n), generator=g).float()
+    X[:, n:, 2] = torch.randint(0, 10, (B, M), generator=g).float()  # levels 7..9 unseen in train
+    X[:, :n, 3] = torch.randint(0, 50, (B, n), generator=g).float()
+    X[:, n:, 3] = torch.randint(25, 75, (B, M), generator=g).float()  # levels 50..74 unseen in train
+    X[:, :, 4] = float("nan")  # all-missing categorical column
+    X[0, 1, 0] = float("nan")
+    X[0, 2, 1] = float("nan")
+    X[0, 3, 2] = float("nan")
+    if M:
+        X[0, n, 0] = float("nan")
+        X[0, n, 2] = float("nan")
+        X[-1, n, 3] = float("nan")
+    cat = torch.tensor([[False, True, True, True, True, False],
+                        [False, False, True, True, True, True]][:B])
+    if B > 2:
+        cat = cat[0].expand(B, m).clone()
+    y = torch.randint(0, C, (B, n), generator=g)
+    y[:, :min(C, n)] = torch.arange(min(C, n))
+    slots = torch.stack([torch.randperm(16, generator=g) for _ in range(B)])
+    perm = torch.stack([torch.randperm(n, generator=g) for _ in range(B)])
+    return X[:, :n], y, X[:, n:], cat, slots, perm
+
+
+@torch.inference_mode()
+def test_v15_categorical_adapter_parity(errors):
+    plain = _model(SMALL_V15)
+    folded = plain.folded()
+    net = VulkanLightPFN(plain)
+    X, y, Xt, cat, slots, perm = mixed_task(B=2, n=23, M=9, C=5)
+    # Numeric-only path (cat=None and all-False cat mask) must match plain and folded exactly.
+    ref_num = plain.encode(X, y, slots=slots, n_classes=5)
+    for mask in (None, torch.zeros_like(cat)):
+        ctx_num = net.encode(X, y, slots=slots, n_classes=5, cat=mask)
+        cache_parity(net, ctx_num, ref_num, errors)
+        errors(net.predict_logits(ctx_num, Xt), plain.predict_logits(ref_num, Xt), "num_logits", atol=2e-5)
+    # Mixed numeric + categorical with default and explicit cat_perm, across chunk sizes.
+    for cp in (None, perm):
+        ref = plain.encode(X, y, slots=slots, n_classes=5, cat=cat, cat_perm=cp)
+        fref = folded.encode(X, y, slots=slots, n_classes=5, cat=cat, cat_perm=cp)
+        expected = plain.predict_logits(ref, Xt)
+        errors(folded.predict_logits(fref, Xt), expected, "folded_cat_logits", atol=2e-5)
+        for chunk in (None, 1, 19, 10**6):
+            ctx = net.encode(X, y, slots=slots, n_classes=5, cat=cat, cat_perm=cp, chunk_cells=chunk)
+            cache_parity(net, ctx, ref, errors)
+            errors(net.predict_logits(ctx, Xt, chunk_cells=chunk), expected, "cat_logits", atol=2e-5)
+
+
+@pytest.mark.parametrize("C", range(2, 11))
+@torch.inference_mode()
+def test_v15_categorical_multiclass_up_to_10(C, errors):
+    plain = _model(SMALL_V15)
+    net = VulkanLightPFN(plain)
+    X, y, Xt, cat, slots, perm = mixed_task(B=2, n=C + 5, M=4, C=C, seed=100 + C)
+    for labels in (y, y % (C - 1)):  # all classes present, then highest class absent
+        ref = plain.encode(X, labels, slots=slots, n_classes=C, cat=cat, cat_perm=perm)
+        ctx = net.encode(X, labels, slots=slots, n_classes=C, cat=cat, cat_perm=perm, chunk_cells=11)
+        cache_parity(net, ctx, ref, errors)
+        errors(net.predict_logits(ctx, Xt, chunk_cells=7), plain.predict_logits(ref, Xt), "logits", atol=2e-5)
+
+
+def test_v15_classifier_wrapper_categorical_no_fallback(errors):
+    pd = pytest.importorskip("pandas")
+    plain = _model(SMALL_V15)
+    rng = np.random.default_rng(73)
+    n, M = 36, 10
+    df = pd.DataFrame({
+        "num": rng.normal(size=n + M).astype(np.float32),
+        "cat_low": pd.Categorical(rng.choice(["a", "b", "c"], size=n + M)),
+        "cat_str": rng.choice(["u", "v", "w", "x", "y"], size=n + M).astype(object),
+        "cat_hi": rng.integers(0, 20, size=n + M).astype(np.float32),
+        "flag": rng.choice([True, False], size=n + M),
+    })
+    df.loc[1, "num"] = np.nan
+    df.loc[2, "cat_str"] = None
+    df_tr, df_te = df.iloc[:n].copy(), df.iloc[n:].copy()
+    df_te.loc[df_te.index[0], "cat_str"] = "unseen_level"
+    df_te.loc[df_te.index[1], "num"] = np.nan
+    y = np.array([f"cls_{i % 5}" for i in range(n)])
+    for estimators in (1, 3):
+        opts = dict(model=plain, n_estimators=estimators, max_context=20, seed=5, n_threads=4, chunk_rows=4)
+        cpu = LightPFNClassifier(device="cpu", **opts).fit(df_tr, y, cat="auto")
+        gpu = LightPFNClassifier(device="vulkan", **opts).fit(df_tr, y, cat="auto")
+        assert gpu.fit_device_ == "vulkan" and gpu.cat_ is not None and gpu.cat_.any()
+        errors(gpu.predict_proba(df_te), cpu.predict_proba(df_te), "df_proba", atol=1e-6)
+        np.testing.assert_array_equal(gpu.predict(df_te), cpu.predict(df_te))
+    # Explicit boolean cat mask on a numpy array with unseen test categories and missing values.
+    X_np = np.column_stack([
+        rng.normal(size=(n + M, 1)),
+        rng.integers(0, 4, size=(n + M, 1)),
+        rng.integers(0, 30, size=(n + M, 1)),
+    ]).astype(np.float32)
+    X_np[n:, 1] = np.array([4, 5, 0, 1, 99, 2, np.nan, 3, 7, 8], dtype=np.float32)
+    X_np[0, 1] = np.nan
+    mask = np.array([False, True, True])
+    cpu = LightPFNClassifier(model=plain, device="cpu", n_estimators=2, seed=3).fit(X_np[:n], y, cat=mask)
+    gpu = LightPFNClassifier(model=plain, device="vulkan", n_estimators=2, seed=3).fit(X_np[:n], y, cat=mask)
+    assert gpu.fit_device_ == "vulkan"
+    errors(gpu.predict_proba(X_np[n:]), cpu.predict_proba(X_np[n:]), "np_proba", atol=1e-6)
+    np.testing.assert_array_equal(gpu.predict(X_np[n:]), cpu.predict(X_np[n:]))
+
+
+@pytest.mark.parametrize("with_cat", [False, True])
+@torch.inference_mode()
+def test_v15_regression_encode_and_predict_quantiles(with_cat, errors):
+    cfg = dict(SMALL_V15, head="quantiles") if with_cat else dict(
+        col_dim=32, col_heads=4, row_heads=4, n_cls=2, icl_heads=4, decoder_heads=4,
+        col_blocks=1, row_blocks=1, icl_blocks=2, n_inducing=4, n_thinking=4, head="quantiles",
+    )
+    plain = _model(cfg)
+    folded = plain.folded()
+    net = VulkanLightPFN(plain)
+    X, _, Xt, cat, _, perm = mixed_task(B=2, n=21, M=7, C=3, seed=53)
+    y = torch.stack([
+        torch.linspace(-3.5, 8.2, 21, dtype=torch.float64),
+        torch.linspace(1.0, 25.0, 21, dtype=torch.float64),
+    ])
+    kw = dict(cat=cat, cat_perm=perm, regression=True) if with_cat else dict(regression=True)
+    ref = plain.encode(X, y, **kw)
+    fref = folded.encode(X, y, **kw)
+    expected_norm = plain.predict_quantiles(ref, Xt, normalized=True)
+    expected_raw = plain.predict_quantiles(ref, Xt, normalized=False)
+    errors(folded.predict_quantiles(fref, Xt, normalized=True), expected_norm, "folded_q_norm", atol=2e-5)
+    errors(folded.predict_quantiles(fref, Xt, normalized=False), expected_raw, "folded_q_raw", atol=2e-5)
+    for chunk in (None, 1, 17, 10**6):
+        ctx = net.encode(X, y, chunk_cells=chunk, **kw)
+        cache_parity(net, ctx, ref, errors)
+        errors(net.predict_quantiles(ctx, Xt, chunk_cells=chunk, normalized=True),
+               expected_norm, "q_norm", atol=2e-5)
+        errors(net.predict_quantiles(ctx, Xt, chunk_cells=chunk, normalized=False),
+               expected_raw, "q_raw", atol=2e-5)
+    # High-offset targets (1e12 + ...): float64 mean/scale must not lose precision before normalization.
+    y_hi = 1e12 + torch.arange(21, dtype=torch.float64)[None].expand(2, -1)
+    ref_hi = plain.encode(X, y_hi, **kw)
+    ctx_hi = net.encode(X, y_hi, **kw)
+    torch.testing.assert_close(ctx_hi.extra["mean"], ref_hi.extra["mean"], rtol=0, atol=0)
+    torch.testing.assert_close(ctx_hi.extra["scale"], ref_hi.extra["scale"], rtol=0, atol=0)
+    errors(net.predict_quantiles(ctx_hi, Xt, normalized=True),
+           plain.predict_quantiles(ref_hi, Xt, normalized=True), "q_hi_norm", atol=2e-5)
+    # Empty query batch M == 0 and wrong-mode guards.
+    assert net.predict_quantiles(ctx, Xt[:, :0], normalized=True).shape == (2, 0, 999)
+    assert net.predict_quantiles(ctx, Xt[:, :0], normalized=False).dtype == torch.float64
+    with pytest.raises(ValueError, match="predict_quantiles"):
+        net.predict_logits(ctx, Xt)
+    cls_ctx = net.encode(X, torch.zeros(2, 21, dtype=torch.long), n_classes=2)
+    with pytest.raises(ValueError, match="predict_logits"):
+        net.predict_quantiles(cls_ctx, Xt)
+    with pytest.raises(ValueError, match="head='quantiles'"):
+        VulkanLightPFN(_model(SMALL_V15)).encode(X, y, regression=True)
+
+
+@pytest.mark.parametrize("target_mode", ["log", "flip"])
+@pytest.mark.parametrize("estimators", [1, 2])
+def test_v15_regressor_wrapper_vulkan(target_mode, estimators, errors, monkeypatch):
+    import lightpfn.regressor as reg_mod
+    from lightpfn.regressor import V15Regressor
+
+    plain = _model(dict(SMALL_V15, head="quantiles"))
+    rng = np.random.default_rng(91)
+    n, M = 28, 8
+    X = np.column_stack([
+        rng.normal(size=(n + M, 2)),
+        rng.integers(0, 5, size=(n + M, 1)),
+        rng.integers(0, 25, size=(n + M, 1)),
+    ]).astype(np.float32)
+    X[n:, 2] = np.array([5, 6, 0, 1, 2, np.nan, 9, 4], dtype=np.float32)  # unseen levels + NaN
+    X[1, 0] = np.nan
+    X[2, 2] = np.nan
+    y = rng.uniform(0.5, 25.0, size=n) if target_mode == "log" else rng.normal(loc=-1.0, scale=4.0, size=n)
+    if target_mode == "flip":
+        y[0] = -2.5  # guarantee min <= 0 so second_ == "flip"
+    cat = np.array([False, False, True, True])
+    opts = dict(max_context=20, seed=7, query_rows=3, chunk_cells=19, n_estimators=estimators,
+                log_skew=-np.inf if target_mode == "log" else 2.0)  # force the log member on a low-skew target
+    cpu = V15Regressor(plain, device="cpu", **opts).fit(X[:n], y, cat=cat)
+    monkeypatch.setattr(reg_mod, "resolve_device", lambda device: "vulkan")
+    gpu = V15Regressor(plain, device="auto", **opts).fit(X[:n], y, cat=cat)
+    assert gpu.fit_device_ == "vulkan" and gpu.precision_ == "fp32"
+    if estimators == 2:
+        assert gpu.second_ == target_mode
+    errors(gpu.predict_quantiles(X[n:]), cpu.predict_quantiles(X[n:]), "quantiles_999", atol=2e-5)
+    errors(gpu.predict_quantiles(X[n:], quantiles=[0.05, 0.5, 0.95]),
+           cpu.predict_quantiles(X[n:], quantiles=[0.05, 0.5, 0.95]), "quantiles_interp", atol=2e-5)
+    errors(gpu.predict(X[n:]), cpu.predict(X[n:]), "point_pred", atol=2e-5)
+
+
+def test_v15_regressor_dataframe_and_memory_fallback(errors, monkeypatch):
+    pd = pytest.importorskip("pandas")
+    import lightpfn.regressor as reg_mod
+    from lightpfn.regressor import V15Regressor
+
+    plain = _model(dict(SMALL_V15, head="quantiles"))
+    rng = np.random.default_rng(109)
+    n, M = 24, 6
+    df = pd.DataFrame({
+        "num": rng.normal(size=n + M).astype(np.float32),
+        "cat": pd.Categorical(rng.choice(["x", "y", "z"], size=n + M)),
+        "str_col": rng.choice(["p", "q", "r", "s"], size=n + M).astype(object),
+    })
+    df.loc[n, "str_col"] = "unseen"
+    df.loc[0, "num"] = np.nan
+    y = rng.uniform(1.0, 10.0, size=n)
+    cpu = V15Regressor(plain, device="cpu", n_estimators=2).fit(df.iloc[:n], y, cat="auto")
+    gpu = V15Regressor(plain, device="vulkan", n_estimators=2).fit(df.iloc[:n], y, cat="auto")
+    assert gpu.fit_device_ == "vulkan"
+    errors(gpu.predict(df.iloc[n:]), cpu.predict(df.iloc[n:]), "df_point_pred", atol=2e-5)
+    # Auto fallback when capacity is exceeded vs explicit error when device="vulkan".
+    monkeypatch.setattr(reg_mod, "resolve_device", lambda device: "vulkan")
+    auto = V15Regressor(plain, device="auto", n_estimators=2)
+    auto._vk_net = gpu._vk_net
+    auto._vk_key = (id(plain), "vulkan")
+    monkeypatch.setattr(auto._vk_net, "train_capacity", lambda n, m: 1)
+    with pytest.warns(RuntimeWarning, match="running this fit on the CPU"):
+        auto.fit(df.iloc[:n], y, cat="auto")
+    assert auto.fit_device_ == "cpu"
+    errors(auto.predict(df.iloc[n:]), cpu.predict(df.iloc[n:]), "fallback_pred", atol=1e-6)
+    monkeypatch.setattr(gpu._vk_net, "train_capacity", lambda n, m: 1)
+    with pytest.raises(MemoryError, match="training cells"):
+        gpu.fit(df.iloc[:n], y, cat="auto")
+    assert not hasattr(gpu, "ctx_")
+
+
+@torch.inference_mode()
+def test_real_v15_classification_checkpoint(errors):
+    if not CLS_V15_CKPT.exists():
+        pytest.skip("v1.5 classification checkpoint is not present")
+    plain = load_model(CLS_V15_CKPT).eval()
+    folded = plain.folded()
+    net = VulkanLightPFN(plain)
+    X, y, Xt, cat, slots, perm = mixed_task(B=1, n=25, M=7, C=5, seed=61)
+    for mask in (None, cat):
+        ref = plain.encode(X, y, slots=slots, n_classes=5, cat=mask, cat_perm=perm)
+        fref = folded.encode(X, y, slots=slots, n_classes=5, cat=mask, cat_perm=perm)
+        ctx = net.encode(X, y, slots=slots, n_classes=5, cat=mask, cat_perm=perm, chunk_cells=29)
+        cache_parity(net, ctx, ref, errors, atol=1e-4)
+        cache_parity(net, ctx, fref, errors, atol=1e-4)
+        errors(net.predict_logits(ctx, Xt, chunk_cells=13), plain.predict_logits(ref, Xt), "logits", atol=2e-5)
+        errors(net.predict_logits(ctx, Xt), folded.predict_logits(fref, Xt), "folded_logits", atol=2e-5)
+    # Wrapper check with categorical columns.
+    X_np, Xt_np = X[0].numpy(), Xt[0].numpy()
+    y_np = y[0].numpy()
+    cat_np = cat[0].numpy()
+    cpu = LightPFNClassifier(model=plain, device="cpu", n_estimators=2, seed=0).fit(X_np, y_np, cat=cat_np)
+    gpu = LightPFNClassifier(model=plain, device="vulkan", n_estimators=2, seed=0).fit(X_np, y_np, cat=cat_np)
+    assert gpu.fit_device_ == "vulkan"
+    errors(gpu.predict_proba(Xt_np), cpu.predict_proba(Xt_np), "wrapper_proba", atol=1e-5)
+    np.testing.assert_array_equal(gpu.predict(Xt_np), cpu.predict(Xt_np))
+
+
+@torch.inference_mode()
+def test_real_v15_regression_checkpoint(errors):
+    from lightpfn.regressor import V15Regressor, load_regression_model
+
+    if not REG_V15_CKPT.exists():
+        pytest.skip("v1.5 regression checkpoint is not present")
+    plain = load_regression_model(REG_V15_CKPT).eval()
+    folded = plain.folded()
+    net = VulkanLightPFN(plain)
+    X, _, Xt, cat, _, perm = mixed_task(B=2, n=25, M=7, C=3, seed=67)
+    y = torch.stack([
+        torch.linspace(0.5, 3.5, 25, dtype=torch.float64),
+        torch.linspace(-1.5, 1.5, 25, dtype=torch.float64),
+    ])
+    for mask in (None, cat):
+        ref = plain.encode(X, y, cat=mask, cat_perm=perm, regression=True)
+        fref = folded.encode(X, y, cat=mask, cat_perm=perm, regression=True)
+        ctx = net.encode(X, y, cat=mask, cat_perm=perm, regression=True, chunk_cells=31)
+        cache_parity(net, ctx, ref, errors, atol=1e-4)
+        cache_parity(net, ctx, fref, errors, atol=1e-4)
+        errors(net.predict_quantiles(ctx, Xt, chunk_cells=15, normalized=True),
+               plain.predict_quantiles(ref, Xt, normalized=True), "q_norm", atol=2e-5)
+        errors(net.predict_quantiles(ctx, Xt, normalized=False),
+               plain.predict_quantiles(ref, Xt, normalized=False), "q_raw", atol=2e-5)
+    # V15Regressor wrapper with both positive (log y) and signed (-y) targets.
+    X_np, Xt_np = X[0].numpy(), Xt[0].numpy()
+    cat_np = cat[0].numpy()
+    for y_np in (y[0].numpy(), y[1].numpy()):
+        cpu = V15Regressor(plain, device="cpu", n_estimators=2).fit(X_np, y_np, cat=cat_np)
+        gpu = V15Regressor(plain, device="vulkan", n_estimators=2).fit(X_np, y_np, cat=cat_np)
+        assert gpu.fit_device_ == "vulkan"
+        errors(gpu.predict_quantiles(Xt_np), cpu.predict_quantiles(Xt_np), "reg_quantiles", atol=2e-5)
+        errors(gpu.predict(Xt_np), cpu.predict(Xt_np), "reg_predict", atol=2e-5)
+
+
+
+def test_public_regressor_on_vulkan_matches_cpu():
+    """LightPFNRegressor(device="vulkan") through the public API equals the torch CPU path."""
+    from test_regressor_api import network, task
+    from lightpfn import LightPFNRegressor
+
+    x, y = task()
+    model = network()
+    cpu = LightPFNRegressor(model=model, device="cpu").fit(x, y)
+    vk = LightPFNRegressor(model=model, device="vulkan").fit(x, y)
+    assert vk.device_.startswith("vulkan") and vk.precision_ == "fp32"
+    np.testing.assert_allclose(vk.predict(x[:7]), cpu.predict(x[:7]), rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(vk.predict_quantiles(x[:7], [.1, .5, .9]),
+                               cpu.predict_quantiles(x[:7], [.1, .5, .9]), rtol=1e-4, atol=1e-5)

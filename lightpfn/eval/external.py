@@ -92,7 +92,8 @@ def _use_external_tasks():
     harness._task = lru_cache(maxsize=8)(lambda task_id: load_task(task_id, EXT_DIR))
 
 
-def run(model_names=(), checkpoint=None, name=None, n_estimators=1, n_threads=8, device="cpu"):
+def run(model_names=(), checkpoint=None, name=None, n_estimators=1, n_threads=8, device="cpu", categorical=False,
+        precision="auto"):
     from lightpfn.eval.harness import evaluate, lite_jobs
 
     _use_external_tasks()
@@ -102,13 +103,22 @@ def run(model_names=(), checkpoint=None, name=None, n_estimators=1, n_threads=8,
         print(f"== {m}", flush=True)
         evaluate(m, jobs, n_threads=n_threads, out_csv=RESULTS / f"{m}.csv", verbose=False)
     if checkpoint:
+        from lightpfn.model_v2.estimator import V2Classifier, load_v2
         from lightpfn.sklearn import LightPFNClassifier, load_model
 
-        model = load_model(checkpoint, device)
+        v2 = load_v2(checkpoint, device)
+        if v2 is not None:
+            # categorical: nominal columns enter as level IDs (models trained on the typed view).
+            def factory(n_threads, seed):
+                return V2Classifier(v2, device=device, seed=seed, n_estimators=n_estimators, categorical=categorical)
+        else:
+            if categorical:
+                raise ValueError("--categorical applies to v2 checkpoints")
+            model = load_model(checkpoint, device)
 
-        def factory(n_threads, seed):
-            return LightPFNClassifier(model=model, device=device, seed=seed, n_estimators=n_estimators,
-                                    n_threads=n_threads if device == "cpu" else None)
+            def factory(n_threads, seed):
+                return LightPFNClassifier(model=model, device=device, seed=seed, n_estimators=n_estimators,
+                                        n_threads=n_threads if device == "cpu" else None, precision=precision)
 
         print(f"== {name}", flush=True)
         evaluate(factory, jobs, n_threads=n_threads, out_csv=RESULTS / f"{name}.csv", verbose=False)
@@ -145,13 +155,16 @@ def main():
     p.add_argument("--n-estimators", type=int, default=1)
     p.add_argument("--n-threads", type=int, default=8)
     p.add_argument("--device", default="cpu")
+    p.add_argument("--precision", choices=["auto", "fp32", "fp16"], default="auto")
+    p.add_argument("--categorical", action="store_true", help="v2 checkpoints: nominal columns as level IDs")
     args = p.parse_args()
     if args.cmd == "build":
         build(args.n_threads)
     elif args.cmd == "run":
         if args.checkpoint and not args.name:
             p.error("--checkpoint needs --name")
-        run(args.models, args.checkpoint, args.name, args.n_estimators, args.n_threads, args.device)
+        run(args.models, args.checkpoint, args.name, args.n_estimators, args.n_threads, args.device, args.categorical,
+            args.precision)
     else:
         report(args.models or None)
 

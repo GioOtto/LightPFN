@@ -65,7 +65,7 @@ def test_reject_malformed_and_folded_checkpoints(tmp_path):
 
 def test_hub_files_use_same_resolved_commit(tmp_path, monkeypatch):
     revision = "a" * 40
-    folder = save_model(small_model(), tmp_path / "snapshots" / revision)
+    folder = save_model(small_model(), tmp_path / "snapshots" / revision / "classifier")
     calls = []
     def download(filename, **kwargs):
         calls.append((filename, kwargs))

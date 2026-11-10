@@ -1,0 +1,55 @@
+% Classification progression of the 1.5 schedule (top: D1, D3, Dcat 10k vs training step, single estimator) and
+% per-dataset Dcat 10k AUC (bottom). Data: plotdata2/v2_cls_progression.dat, cls_milestones.dat, dcat_tasks.dat.
+\begin{tikzpicture}
+\pgfplotsset{prog/.style={
+  width=5.75cm, height=4.3cm, xmin=22, xmax=142, xtick={30,60,90,120,135}, xticklabels={30k,60k,90k,120k,135k},
+  grid=major, grid style={black!12}, tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  title style={font=\scriptsize\bfseries, yshift=-4pt}, every axis plot/.append style={line width=0.9pt, mark size=1.6pt},
+  yticklabel style={/pgf/number format/.cd, fixed, fixed zerofill, precision=3, skip 0.=true},
+  xlabel={training step}}}
+\begin{axis}[prog, name=d1, title={D1 (1,536 synthetic tasks)}, ymin=0.869, ymax=0.880, ylabel={mean AUC}]
+\fill[black!6] (axis cs:120,0.869) rectangle (axis cs:142,0.880);
+\addplot[ccell, dashed, domain=22:142, samples=2] {0.878134};
+\addplot[cicl, dashdotted, domain=22:142, samples=2] {0.878254};
+\addplot[cdata, mark=*, line width=1.2pt] table[x=step_k, y=d1_auc] {plotdata2/v2_cls_progression.dat};
+\end{axis}
+\begin{axis}[prog, name=d3, at={(d1.east)}, anchor=west, xshift=0.95cm, title={D3 (55 OpenML datasets)}, ymin=0.904, ymax=0.912]
+\fill[black!6] (axis cs:120,0.904) rectangle (axis cs:142,0.912);
+\addplot[ccell, dashed, domain=22:142, samples=2] {0.910352};
+\addplot[cicl, dashdotted, domain=22:142, samples=2] {0.910923};
+\addplot[crow, densely dotted, domain=22:142, samples=2] {0.9023};
+\addplot[cdata, mark=*, line width=1.2pt] table[x=step_k, y=d3_auc] {plotdata2/v2_cls_progression.dat};
+\node[font=\tiny, text=crow, anchor=south west] at (axis cs:24,0.9023) {CatBoost .9023};
+\end{axis}
+\begin{axis}[prog, name=dc, at={(d3.east)}, anchor=west, xshift=0.95cm, title={Dcat 10k (6 categorical datasets)},
+  ymin=0.665, ymax=0.716,
+  legend style={font=\scriptsize, draw=black!30, at={(-0.95,-0.36)}, anchor=north, legend columns=5, column sep=5pt}]
+\fill[black!6] (axis cs:120,0.665) rectangle (axis cs:142,0.716);
+\addplot[ccell, dashed, domain=22:142, samples=2] {0.689523};
+\addplot[cicl, dashdotted, domain=22:142, samples=2] {0.704708};
+\addplot[crow, densely dotted, domain=22:142, samples=2] {0.703133};
+\addplot[cdec, dotted, domain=22:142, samples=2] {0.711086};
+\addplot[cdata, mark=*, line width=1.2pt] table[x=step_k, y=dcat10k_auc] {plotdata2/v2_cls_progression.dat};
+\addplot[black!45, densely dotted, domain=22:142, samples=2] {0.670577};
+\legend{{1.0 final (120k)},{1.1.0 (long-context)},{CatBoost (default)},{Kumo-Tabular-Small (27.5M)},{LightPFN 1.5 (main, then long)},{1.0 at 30k}}
+\end{axis}
+
+\begin{axis}[
+  at={(d1.south west)}, anchor=north west, yshift=-2.75cm,
+  width=17.2cm, height=4.4cm,
+  ybar=1.2pt, bar width=5.2pt, enlarge x limits=0.09,
+  xtick={0,1,2,3,4,5}, xticklabels={albert,porto-seguro,kick,okcupid-stem,sf-police-incidents,airlines},
+  tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  ymin=0.55, ymax=0.85, ytick={0.55,0.60,0.65,0.70,0.75,0.80,0.85}, yticklabels={.55,.60,.65,.70,.75,.80,.85},
+  ylabel={AUC at 10k rows}, grid=major, grid style={black!12},
+  legend style={font=\scriptsize, draw=black!30, at={(0.5,1.03)}, anchor=south, legend columns=6, column sep=5pt},
+]
+\addplot[fill=ccell!65, draw=ccell!90!black] table[x=idx, y=v1_120k_10k] {plotdata2/dcat_tasks.dat};
+\addplot[fill=cicl!65, draw=cicl!90!black] table[x=idx, y=v1_10k] {plotdata2/dcat_tasks.dat};
+\addplot[fill=crow!70, draw=crow!90!black] table[x=idx, y=cb_10k] {plotdata2/dcat_tasks.dat};
+\addplot[fill=black!25, draw=black!60] table[x=idx, y=seldon_10k] {plotdata2/dcat_tasks.dat};
+\addplot[fill=cdec!45, draw=cdec!90!black] table[x=idx, y=kumo_10k] {plotdata2/dcat_tasks.dat};
+\addplot[fill=cdata!80, draw=cdata!95!black] table[x=idx, y=v2_10k] {plotdata2/dcat_tasks.dat};
+\legend{{1.0 final (120k)},{1.1.0},{CatBoost (default)},{Seldon-Mini (27.4M)},{Kumo-Tabular-Small (27.5M)},{LightPFN 1.5 (4.6M)}}
+\end{axis}
+\end{tikzpicture}

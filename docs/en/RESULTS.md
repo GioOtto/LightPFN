@@ -2,34 +2,104 @@
 
 **English** · [Italiano](../it/RISULTATI.md)
 
-Protocols are described in the [technical report](../../paper/LightPFN_report.pdf). The tables report results
-from the report and the linked CSVs. The official TabArena section includes default, tuned and ensembled
-baselines; the other comparisons use default baselines. AUC differences are in points (100 times the AUC difference), with 95% paired bootstrap
-intervals over tasks or datasets. The released model is the long-context checkpoint (LC39k in the report).
+This page reports the local evaluation results of LightPFN 1.5 and the full benchmark results of LightPFN 1.1.
+Protocols and ablations are described in the
+[LightPFN 1.5 technical report](https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN15_report.pdf) and
+the [report of 1.1](../../paper/LightPFN_report.pdf). The official TabArena leaderboard entry is LightPFN 1.1
+(the long-context checkpoint LC39k in the 1.1 report, 4,603,088 parameters); LightPFN 1.5 has no official
+leaderboard entry yet, and its measurements below are local runs.
 
-- [Evaluation sets](#evaluation-sets)
-- [Small tables: 55 OpenML datasets outside TabArena](#small-tables-55-openml-datasets-outside-tabarena)
-- [TabArena, official leaderboard](#tabarena-official-leaderboard)
-- [TabArena, 38 classification tasks with our harness](#tabarena-38-classification-tasks-with-our-harness)
-- [Larger tables](#larger-tables)
-- [Cost](#cost)
-- [Categorical features: what did not work](#categorical-features-what-did-not-work)
+- [Results of 1.5 (local evaluations)](#results-of-15-local-evaluations)
+  - [Final second-member rule: CPU fp32 check](#final-second-member-rule-cpu-fp32-check)
+- [Results of 1.1](#results-of-11)
+  - [Evaluation sets](#evaluation-sets)
+  - [Small tables: 55 OpenML datasets outside TabArena](#small-tables-55-openml-datasets-outside-tabarena)
+  - [TabArena, official leaderboard](#tabarena-official-leaderboard)
+  - [TabArena, 38 classification tasks with our harness](#tabarena-38-classification-tasks-with-our-harness)
+  - [Larger tables](#larger-tables)
+  - [Cost](#cost)
+  - [Categorical features: what did not work](#categorical-features-what-did-not-work)
+
+## Results of 1.5 (local evaluations)
+
+<a id="results-of-20"></a>
+
+Local results compiled on 9 November 2026, not official leaderboard results. The historical sections further
+below describe LightPFN 1.1.
+
+| Measurement (1.5, local) | Result | Protocol and limit |
+|---|---|---|
+| Classification Lite, final classifier | Elo 1436 (+74 / -65), 1.1 1423; earlier 1.5 classifier 1416 on the same GPU (1415 on RX 7900 XT); 24 lower-error tasks, 14 higher | 38 tasks, first split, RTX 5090; hosted baseline snapshot |
+| Regression Lite, final author run | Elo 1450 (+107 / -103), default CatBoost 1416 | 13 tasks, fold 0, RX 7900 XT; final skewness-gated rule |
+| Earlier two members versus one | RMSE -1.03% [-1.73, -0.40] D3-reg; -6.72% [-14.12, -1.31] D3-reg-L | 23 and 15 development tasks, full context; previous rule |
+| Classification train / predict speed | 1.89x / 2.04x relative to 1.1.0 | Geometric means, 8 tasks, 8 folds x 4 members, same RTX 5090, measured fp16 threshold 8,192 cells |
+| Wide-table fine-tuning, final minus earlier 1.5 classifier | D3 > 100 features: AUC +1.93 points [-0.06, +5.82], log loss -0.048 [-0.108, -0.004]; D3 +0.01 [-0.06, +0.09]; Dcat 10k +0.07 [+0.00, +0.16]; D4 +0.12 [+0.05, +0.21]; TabArena first split relative error -0.85% [-1.83, -0.04] | Four members, paired 95% bootstrap; 9, 55, 6 and 13 datasets, 38 TabArena tasks (monitored during the fine-tuning, not independent) |
+| Classification, final classifier, one member | D3 AUC 0.9102, Dcat 10k 0.7082 | Same protocols as the rows below |
+| Classification, 1.5 classifier before the wide-table fine-tuning | D3 AUC 0.9103 (1.1.0: 0.9109, default CatBoost: 0.9023) | 55 OpenML-CC18 datasets not in TabArena, one member, local |
+| High-cardinality categorical tasks (Dcat) | AUC 0.7075 at 10k rows, 0.7134 at 25k (1.1.0: 0.7047 / 0.7098; default CatBoost: 0.7031 / 0.7118) | 6 datasets with high-cardinality categorical columns, one member, local |
+| Large tables (D4) | AUC 0.8200 (1.1.0: 0.8188; default CatBoost: 0.8189) | 46 cells, one member, local |
+
+Scaling the official 1.1.0 timings by these speed ratios suggests ~0.14 s train and ~0.014 s predict per 1,000
+rows: this is a cross-hardware extrapolation, not an official 1.5 measurement. The package fp16 threshold is now
+2,048 context cells per member. The final default in `LightPFNRegressor` applies `log(y)` only for positive
+targets with adjusted sample skewness at least 2 (`log_skew=2.0`), otherwise `-y` (`"flip"`). This rule was
+selected on the development sets and is used in the final Lite run above. Earlier wrapper runs scored
+1315 and 1351 regression Elo against a smaller baseline snapshot; these are not directly comparable Elo
+changes. Final local positions are 34/115 for classification (final classifier; 35/115 for the earlier one) and 54/111 for regression, including imputed
+baseline entries. There is no imputation for LightPFN 1.5. Local timings are 0.31/0.041 s per 1,000 rows for
+classification train/predict (earlier classifier, RX 7900 XT; final classifier on the RTX 5090: 0.29/0.023) and 0.21/0.033 for regression; other CPU jobs were running, and hosted baseline
+times use different hardware.
+
+The final rule gives mean normalized CRPS/RMSE of **0.1748/0.4042** on D3-reg and **0.1546/0.3691** on
+D3-reg-L. D3-reg has at most 800 context rows; D3-reg-L has two splits on each of 15 sources with at least
+4,000 finite rows, up to 40,000 context rows and 5,000 test rows. These are fixed-weight CPU fp32 results.
+Default CatBoost gives RMSE 0.4794 and 0.3689 in the respective protocols; LightPFN wins 22/23 and 11/15
+tasks. Its geometric-mean RMSE ratios to CatBoost are 0.791 and 0.921. On the final Lite regression run, the
+ratio is 0.972 (8/13 wins), while larger Kumo-Tabular-Small and TabICLv2 beat LightPFN on every task.
+D3-reg tree quantiles use held-out residual calibration; D3-reg-L uses point fits, and Lite uses TabArena
+bagging. The benchmark protocols and aggregations differ.
+
+### Final second-member rule: CPU fp32 check
+
+All 23 D3-reg tasks (115 splits) and all 15 D3-reg-L tasks (30 splits), four CPU threads. Relative change in
+RMSE and CRPS, averaging splits per task first, then task ratios; 95% paired task bootstrap intervals (10,000
+draws). Negative is better. The saved CSV reference uses the preceding GPU package path; the CPU reference
+reruns its old positive-target rule in fp32 to isolate the rule change.
+
+| Set | Reference | RMSE % [95% CI] | CRPS % [95% CI] |
+|---|---|---:|---:|
+| D3-reg (23 tasks) | Saved package CSV | -0.74 [-1.61, -0.13] | -0.75 [-1.44, -0.19] |
+| D3-reg (23 tasks) | Old rule, CPU fp32 | -0.70 [-1.52, -0.10] | -0.72 [-1.40, -0.18] |
+| D3-reg-L (15 tasks) | Saved package CSV | -2.33 [-5.22, -0.39] | -2.03 [-4.54, -0.30] |
+| D3-reg-L (15 tasks) | Old rule, CPU fp32 | -1.78 [-4.05, -0.15] | -1.55 [-3.45, -0.11] |
+
+The skewness threshold was selected on these development tasks, so the estimates are optimistic. These are local
+development runs, not official TabArena results. [Numerical summary CSV](../assets/v2_regression_quality.csv).
+
+## Results of 1.1
+
+Protocols are described in the [report of 1.1](../../paper/LightPFN_report.pdf). The tables below report results
+for the **LightPFN 1.1** weights (the long-context checkpoint LC39k in the 1.1 report, 4,603,088 parameters) from
+the report and the linked CSVs. The official TabArena section includes default, tuned and ensembled baselines;
+the other comparisons use default baselines. AUC differences are in points (100 times the AUC difference), with
+95% paired bootstrap intervals over tasks or datasets.
 
 ## Evaluation sets
 
 Design decisions were taken on three sets kept apart from TabArena: D1, 1,536 held-out synthetic tasks; D2,
 mechanism probes (XOR, parity, lookup tables among noise columns); D3, 55 OpenML-CC18 classification datasets
-that are not in TabArena. For this series, after introducing the selection protocol, TabArena was looked at
+that are not in TabArena. For the 1.1 series, after introducing the selection protocol, TabArena was looked at
 only for the two finalists, after choosing between them. An earlier exploratory r2 evaluation predates this
-protocol and is disclosed in the technical report, Section 7.
+protocol and is disclosed in the 1.1 technical report, Section 7.
 
 ## Small tables: 55 OpenML datasets outside TabArena
 
-At most 1,000 rows and 100 random features per dataset, stratified five-fold cross-validation, one estimator.
+Results for **LightPFN 1.1** (at most 1,000 rows and 100 random features per dataset, stratified five-fold
+cross-validation, one estimator):
 
-| Model | Mean AUC | LightPFN minus model | LightPFN higher on |
+| Model | Mean AUC | LightPFN 1.1 minus model | LightPFN 1.1 higher on |
 |---|---:|---:|---:|
-| **LightPFN** | **0.9109** | | |
+| **LightPFN 1.1** | **0.9109** | | |
 | CatBoost | 0.9023 | +0.86 [0.42, 1.40] | 80% of datasets |
 | Random forest | 0.8933 | +1.76 [1.03, 2.62] | 91% |
 | LightGBM | 0.8907 | +2.02 [1.14, 3.16] | 91% |
@@ -43,13 +113,13 @@ The lead over CatBoost holds on binary (+0.80) and multiclass (+0.92) datasets, 
 ## TabArena, official leaderboard
 
 Leaderboard of 11 October 2026 ([TabArena Space](https://huggingface.co/spaces/TabArena/leaderboard), data
-commit `0aac376`). The TabArena maintainers ran LightPFN on the 38 classification datasets with the official
-protocol (eight-fold bagging, `8x1` validation) in its default configuration: four estimators, one checkpoint,
-no search space. They marked the result as verified; none of its results is imputed. The views below are
-Classification with imputed models excluded. The default view of the page also covers the 13 regression
-datasets, which LightPFN does not support, so they are imputed (42nd of 99 there).
+commit `0aac376`). The TabArena maintainers ran **LightPFN 1.1** on the 38 classification datasets with the
+official protocol (eight-fold bagging, `8x1` validation) in its default configuration: four estimators, one
+checkpoint, no search space. They marked the result as verified; none of its classification results is imputed.
+The views below are Classification with imputed models excluded. The default view of the page also covers the 13
+regression datasets, which LightPFN 1.1 did not support, so they are imputed (42nd of 99 there).
 
-| View | Datasets | Position | Elo (95% CI) |
+| View (LightPFN 1.1) | Datasets | Position | Elo (95% CI) |
 |---|---:|---:|---:|
 | **Classification, all splits** | 38 | **21st of 92** | **1441 (+69 / -79)** |
 | Classification, Lite (first split) | 38 | 20th of 92 | 1426 (+71 / -70) |
@@ -60,7 +130,7 @@ datasets, which LightPFN does not support, so they are imputed (42nd of 99 there
 
 Elo is computed among the methods of each view, so values are not comparable across rows.
 
-![Elo with 95% intervals for selected methods, LightPFN in blue](../assets/tabarena_elo.png)
+![Elo with 95% intervals for selected methods, LightPFN 1.1 in blue](../assets/tabarena_elo.png)
 
 Selected methods, classification, all splits. Times are TabArena's medians in seconds per 1,000 rows; tuned
 entries include their search time.
@@ -74,7 +144,7 @@ entries include their search time.
 | 18 | TabDPT-1.3 (default) | 1524 | +75 / -57 | 0.62 | 0.172 |
 | 19 | RealMLP (tuned + ensembled) | 1474 | +53 / -43 | 2879.46 | 12.484 |
 | 20 | TabM (tuned + ensembled) | 1452 | +56 / -40 | 2168.86 | 2.347 |
-| **21** | **LightPFN (default)** | **1441** | **+69 / -79** | **0.26** | **0.029** |
+| **21** | **LightPFN 1.1 (default)** | **1441** | **+69 / -79** | **0.26** | **0.029** |
 | 22 | LightGBM (tuned + ensembled) | 1426 | +43 / -29 | 382.09 | 1.487 |
 | 24 | CatBoost (tuned + ensembled) | 1410 | +53 / -44 | 1107 | 0.329 |
 | 27 | CatBoost (tuned) | 1400 | +47 / -43 | 1107 | 0.038 |
@@ -84,26 +154,26 @@ entries include their search time.
 | 66 | LightGBM (default) | 1191 | +50 / -41 | 1.79 | 0.12 |
 | 87 | RandomForest (default) | 1000 | +62 / -65 | 0.38 | 0.037 |
 
-The Elo point estimate is above every tree-based method, tuned and ensembled ones included. Its interval
-overlaps those of default CatBoost and of the tuned gradient-boosting entries, so against them this is not a
-clear win; default XGBoost and LightGBM are more than 200 points lower, with separate intervals. In TabArena's
-win-rate matrix LightPFN beats tuned and ensembled CatBoost, LightGBM and XGBoost in 58%, 58% and 64% of the
-comparisons, and TabICLv2 in 25%. The first 18 places are all foundation models. The weak spot is the 10
-medium datasets (44th of 93, where default CatBoost is 17th), in line with the larger-table results below.
+The Elo point estimate of LightPFN 1.1 is above every tree-based method, tuned and ensembled ones included. Its
+interval overlaps those of default CatBoost and of the tuned gradient-boosting entries, so against them this is
+not a clear win; default XGBoost and LightGBM are more than 200 points lower, with separate intervals. In
+TabArena's win-rate matrix LightPFN 1.1 beats tuned and ensembled CatBoost, LightGBM and XGBoost in 58%, 58% and
+64% of the comparisons, and TabICLv2 in 25%. The first 18 places are all foundation models. The weak spot is the
+10 medium datasets (44th of 93, where default CatBoost is 17th), in line with the larger-table results below.
 
-![Elo against median training time for 92 methods, LightPFN on the Pareto front](../assets/tabarena_pareto.png)
+![Elo against median training time for 92 methods, LightPFN 1.1 on the Pareto front](../assets/tabarena_pareto.png)
 
-LightPFN is on the Pareto front of Elo against training time and against prediction time: only KNN trains
-faster, and only EBM and default CatBoost predict faster, all with a lower Elo. TabArena timed LightPFN on a GPU
-and the tree-based methods on a CPU, so the time axis compares setups as they were run, not algorithms on equal
-hardware.
+LightPFN 1.1 is on the Pareto front of Elo against training time and against prediction time: only KNN trains
+faster, and only EBM and default CatBoost predict faster, all with a lower Elo. TabArena timed LightPFN 1.1 on a
+GPU and the tree-based methods on a CPU, so the time axis compares setups as they were run, not algorithms on
+equal hardware.
 
 [Classification CSV, all splits](../assets/tabarena_classification_all_splits.csv),
 [classification CSV, Lite](../assets/tabarena_classification_lite.csv) (as published by TabArena).
 
 ### Earlier author-run Lite evaluation (8 October 2026)
 
-Before the maintainers' run we ran the Lite benchmark ourselves, with
+Before the maintainers' run we ran the Lite benchmark ourselves on LightPFN 1.1, with
 `TabArenaV0pt1ExperimentBundle(models=[("LightPFN", 0)])` and `subset=["lite", "classification"]`: same
 configuration, first official split of each dataset. Context caching is off in fold models and on in the refit
 model. All 38 tasks succeeded, none imputed. Against the leaderboard of that day it was **25th of 99, Elo 1420
@@ -115,27 +185,27 @@ The script imports `torch` before AutoGluon so it detects the AMD GPU through RO
 
 ## TabArena, 38 classification tasks with our harness
 
-The 38 classification tasks of TabArena v0.1, official OpenML splits, first repeat (114 splits). This is our own
-harness, not the official leaderboard protocol (which bags models, tunes them and ranks by Elo); the 13
-regression tasks are not evaluated. Error is 1 - AUC for binary tasks and the log loss for multiclass tasks, as
-in TabArena; ranks are computed on the error.
+The 38 classification tasks of TabArena v0.1, official OpenML splits, first repeat (114 splits), evaluated on
+**LightPFN 1.1**. This is our own harness, not the official leaderboard protocol (which bags models, tunes them
+and ranks by Elo); the 13 regression tasks are not evaluated here. Error is 1 - AUC for binary tasks and the log
+loss for multiclass tasks, as in TabArena; ranks are computed on the error.
 
 | Model | Mean AUC | Mean rank of 7 | Lower error than CatBoost |
 |---|---:|---:|---:|
 | TabICLv2 (28M parameters, GPU) | 0.8637 | 1.58 | 87% |
-| **LightPFN, 4 estimators** | **0.8581** | **2.50** | **76%** |
-| LightPFN, 1 estimator | 0.8568 | 3.37 | 68% |
+| **LightPFN 1.1, 4 estimators** | **0.8581** | **2.50** | **76%** |
+| LightPFN 1.1, 1 estimator | 0.8568 | 3.37 | 68% |
 | CatBoost | 0.8553 | 3.50 | |
 | LightGBM | 0.8440 | 5.34 | 5% |
 | Random forest | 0.8383 | 5.89 | 3% |
 | XGBoost | 0.8332 | 5.82 | 11% |
 
-The mean AUC difference from CatBoost is +0.28 points [-0.26, 0.80]: LightPFN wins more tasks, but the mean
+The mean AUC difference from CatBoost is +0.28 points [-0.26, 0.80]: LightPFN 1.1 wins more tasks, but the mean
 difference is not significant. TabICLv2 is ahead by 0.56 points [0.25, 0.98].
 
-By group (LightPFN with 4 estimators against CatBoost):
+By group (LightPFN 1.1 with 4 estimators against CatBoost):
 
-| Group | Tasks | Mean rank, LightPFN / CatBoost / TabICLv2 | AUC points vs CatBoost | Tasks won |
+| Group | Tasks | Mean rank, LightPFN 1.1 / CatBoost / TabICLv2 | AUC points vs CatBoost | Tasks won |
 |---|---:|---|---:|---:|
 | binary | 30 | 2.60 / 3.30 / 1.57 | +0.25 | 70% |
 | multiclass | 8 | 2.13 / 4.25 / 1.63 | +0.38 | 100% |
@@ -144,13 +214,13 @@ By group (LightPFN with 4 estimators against CatBoost):
 | 10,000 rows or more | 16 | 2.56 / 3.13 / 1.56 | -0.40 | 69% |
 | minority class 1 to 10% | 11 | 2.55 / 2.91 / 1.82 | -0.35 | 64% |
 
-The largest losses are on mostly categorical tables: *in_vehicle_coupon_recommendation* (-4.49 points),
+The largest losses of 1.1 are on mostly categorical tables: *in_vehicle_coupon_recommendation* (-4.49 points),
 *Amazon_employee_access* (-3.95) and *Diabetes130US* (-2.35).
 
 <details>
-<summary>Mean AUC per task (best in bold), sorted by LightPFN minus CatBoost</summary>
+<summary>Mean AUC per task (best in bold), sorted by LightPFN 1.1 minus CatBoost</summary>
 
-| Task | Train rows | Features | Classes | LightPFN x4 | CatBoost | TabICLv2 | LightGBM | XGBoost | RF |
+| Task | Train rows | Features | Classes | LightPFN 1.1 x4 | CatBoost | TabICLv2 | LightGBM | XGBoost | RF |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | jm1 | 7,257 | 21 | 2 | **0.7781** | 0.7421 | 0.7777 | 0.7385 | 0.7170 | 0.7505 |
 | seismic-bumps | 1,723 | 15 | 2 | 0.7819 | 0.7501 | **0.7867** | 0.7267 | 0.7094 | 0.7301 |
@@ -197,10 +267,12 @@ The largest losses are on mostly categorical tables: *in_vehicle_coupon_recommen
 
 ## Larger tables
 
+Results for **LightPFN 1.1**:
+
 **Learning curves.** The 15 D3 datasets with at least 5,000 rows, two repeats, the whole training set as context
 (one estimator). Difference from default CatBoost:
 
-| Training rows | Datasets | CatBoost AUC | LightPFN minus CatBoost |
+| Training rows | Datasets | CatBoost AUC | LightPFN 1.1 minus CatBoost |
 |---|---:|---:|---:|
 | 1,000 | 15 | 0.8959 | +0.46 [0.13, 0.95] |
 | 2,000 | 15 | 0.9071 | +0.51 [0.22, 0.84] |
@@ -213,21 +285,22 @@ The largest losses are on mostly categorical tables: *in_vehicle_coupon_recommen
 **Large datasets (D4).** 13 OpenML datasets of 50,000 to 2.2 million rows outside TabArena and D3, 5,000 test
 rows, one repeat, the whole training set as context:
 
-| Training rows | Datasets | CatBoost AUC | LightPFN AUC | LightPFN minus CatBoost | LightGBM / XGBoost minus CatBoost |
+| Training rows | Datasets | CatBoost AUC | LightPFN 1.1 AUC | LightPFN 1.1 minus CatBoost | LightGBM / XGBoost minus CatBoost |
 |---|---:|---:|---:|---:|---:|
 | 10,000 | 13 | 0.8141 | 0.8168 | +0.28 [-0.53, 1.20] | -4.33 / -3.30 |
 | 25,000 | 13 | 0.8225 | 0.8234 | +0.09 [-0.81, 1.08] | -3.52 / -2.72 |
 | 50,000 | 12 | 0.8311 | 0.8291 | -0.20 [-1.17, 0.76] | -4.01 / -2.78 |
 | 100,000 | 8 | 0.8027 | 0.7993 | -0.34 [-1.95, 1.29] | -0.83 / -2.51 |
 
-LightPFN leads on *porto-seguro*, *jannis*, *covertype* and *Higgs* and trails on *albert*, *road-safety* and *kick*,
-where high-cardinality categorical columns matter.
+LightPFN 1.1 leads on *porto-seguro*, *jannis*, *covertype* and *Higgs* and trails on *albert*, *road-safety* and
+*kick*, where high-cardinality categorical columns matter.
 
 ## Cost
 
-**TabArena, median fit plus predict time per split** (full protocol). The hosts differ, so the comparison across
-rows is indicative only: tree ensembles ran on an Intel i7-13700KF with four threads per job, LightPFN on an AMD
-EPYC 9654 with 12 threads per job (eight concurrent jobs) and on one RTX 5090, TabICLv2 on an RX 7900 XT.
+**TabArena (1.1), median fit plus predict time per split** (full protocol). The hosts differ, so the comparison
+across rows is indicative only: tree ensembles ran on an Intel i7-13700KF with four threads per job,
+LightPFN 1.1 on an AMD EPYC 9654 with 12 threads per job (eight concurrent jobs) and on one RTX 5090, TabICLv2
+on an RX 7900 XT.
 
 | Model | Hardware | Small tables | Medium | Large | Predict, s per 1,000 rows |
 |---|---|---:|---:|---:|---:|
@@ -235,31 +308,36 @@ EPYC 9654 with 12 threads per job (eight concurrent jobs) and on one RTX 5090, T
 | XGBoost | i7, 4 threads | 0.05 s | 0.16 s | 0.48 s | 0.015 |
 | CatBoost | i7, 4 threads | 2.87 s | 4.25 s | 6.71 s | 0.018 |
 | TabICLv2 | RX 7900 XT | 0.49 s | 3.20 s | 5.45 s | 2.87 |
-| LightPFN, 4 estimators | EPYC, 12 threads | 1.03 s | 15.4 s | 54.1 s | 4.12 |
-| LightPFN, 1 estimator | EPYC, 12 threads | 0.23 s | 3.87 s | 13.5 s | 1.05 |
-| LightPFN, 4 estimators | RTX 5090 | 0.02 s | 0.24 s | 1.18 s | 0.06 |
+| LightPFN 1.1, 4 estimators | EPYC, 12 threads | 1.03 s | 15.4 s | 54.1 s | 4.12 |
+| LightPFN 1.1, 1 estimator | EPYC, 12 threads | 0.23 s | 3.87 s | 13.5 s | 1.05 |
+| LightPFN 1.1, 4 estimators | RTX 5090 | 0.02 s | 0.24 s | 1.18 s | 0.06 |
 
 Small tables have fewer than 2,500 rows, large ones 10,000 or more. On large tables the CPU cost is the
 in-context attention over long contexts; a GPU removes most of it. Vulkan timings are in [VULKAN.md](VULKAN.md).
 
 **Inference implementation.** The default path (cache-blocked cell stages, a folded copy of the network,
 estimator batching on GPU) is 1.1 to 4.1 times faster on CPU than the plain implementation, with peak memory up
-to 2.3 times lower and the same predictions up to rounding (report, Section 10).
+to 2.3 times lower and the same predictions up to rounding (1.1 report, Section 10). In 1.5, `precision="auto"`
+(fp16 on supported CUDA/ROCm GPUs) and layer fusions further speed up GPU training by 1.89x and prediction by
+2.04x on the 8-fold x 4-member protocol.
 
 ## Categorical features: what did not work
 
-Version 1 reads categorical columns as ordinal codes. On large tables with high-cardinality categorical columns
-(hundreds to thousands of levels) CatBoost's ordered target statistics extract 0.4 to 2 AUC points from those
-columns at 10,000 rows; LightPFN extracts almost nothing. We tried, without retraining the model:
+Version 1.1 reads categorical columns as ordinal codes. On large tables with high-cardinality categorical
+columns (hundreds to thousands of levels) CatBoost's ordered target statistics extract 0.4 to 2 AUC points from
+those columns at 10,000 rows; LightPFN 1.1 extracts almost nothing. In 1.1 we tried, without retraining the
+model:
 
 - 13 inference-only encodings on D3 (frequency, one-hot, random recoding, smoothed target and leave-one-out
-  encodings): none gives a clear gain; target encodings cost 0.3 to 0.5 points and leave-one-out statistics
-  make the model collapse (-12 points);
-- the count columns of NVIDIA's Kumo Tabular (a log count per category, for columns with more than 50 levels)
-  on the six D4 datasets with such columns: +0.03 points [-0.19, 0.23], noise;
+  encodings): none gives a clear gain; target encodings cost 0.3 to 0.5 points and leave-one-out statistics make
+  the model collapse (-12 points);
+- the count columns of NVIDIA's Kumo Tabular (a log count per category, for columns with more than 50 levels) on
+  the six D4 datasets with such columns: +0.03 points [-0.19, 0.23], noise;
 - a categorical adapter (6,384 parameters: separate Fourier weights for categorical columns and CatBoost-style
-  ordered target statistics), fine-tuned with the released weights frozen: no gain (-0.06 to +0.01 points).
+  ordered target statistics), fine-tuned with the released 1.1 weights frozen: no gain (-0.06 to +0.01 points).
 
 The mechanism works, but the v1 prior has no categorical columns of the kind real data has (many rare levels,
-each with a small effect of its own), so there is nothing to learn. Native categorical handling therefore moves
-to version 2, together with a prior that contains such columns.
+each with a small effect of its own), so there was nothing to learn when freezing 1.1. Version 1.5 therefore
+trains the categorical adapter from scratch on a prior mix with 90% `graph` v4 (which includes quantized
+high-cardinality categorical columns) and `--cat-mask-drop 0.25`, gaining +3.1 AUC points on the six Dcat tasks
+at 10,000 rows compared with the 30,000-step baseline without the adapter.

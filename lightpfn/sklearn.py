@@ -8,7 +8,9 @@ estimator with stratification, so every class (even one with a single row) stays
 
 import copy
 import dataclasses
+import logging
 import warnings
+from contextlib import nullcontext
 from numbers import Integral
 
 import numpy as np
@@ -20,6 +22,8 @@ from sklearn.utils.validation import check_is_fitted, validate_data
 from lightpfn.checkpoint import load_model, load_pretrained
 from lightpfn.device import kind, resolve_device
 from lightpfn.model.lightpfn import Config, LightPFN
+from lightpfn.model.layers import fuse_enabled
+from lightpfn.precision import _FP16_VIEWS, _half_linears, _half_signature, shared_fp16_view
 
 # Inference pieces, in cells (rows x features, times the estimators of a batch); measured on an 8-core
 # CPU and an RTX 5090 (inference section of the technical report).
@@ -27,6 +31,7 @@ CPU_CHUNK_CELLS_PER_THREAD = 1024
 GPU_CHUNK_CELLS = 1 << 20
 CPU_BATCH_CELLS = 0  # one estimator at a time: batching saves nothing once pieces fit the cache
 GPU_BATCH_CELLS = 1 << 22
+FP16_MIN_CELLS = 2048  # context rows x features of one estimator; RTX 5090 crossover 1600-3000 cells (2026-11-09)
 
 
 def _is_frame(X):
@@ -38,6 +43,54 @@ def _is_categorical(dtype):
 
     return (isinstance(dtype, pd.CategoricalDtype) or dtype == object or pd.api.types.is_string_dtype(dtype)
             or pd.api.types.is_bool_dtype(dtype))
+
+
+AUTO_MAX_LEVELS = 20
+
+
+def auto_categorical(X, max_levels=AUTO_MAX_LEVELS):
+    """cat="auto": (m,) bool, DataFrame categorical dtypes plus numeric columns whose values (NaN ignored) are all
+    integers with 2..max_levels distinct values. A heuristic: integer-coded nominal columns are found, low-
+    cardinality ordinal or count columns are taken as categorical too (the categorical adapter still sees
+    their numerical value, so the cost of a false positive is small)."""
+    if isinstance(max_levels, bool) or not isinstance(max_levels, Integral) or max_levels < 2:
+        raise ValueError("max_levels must be an integer >= 2")
+    frame = _is_frame(X)
+    if not frame:
+        X = np.asarray(X)
+    if X.ndim != 2:
+        raise ValueError("auto_categorical needs a 2-D array")
+    out = np.zeros(X.shape[1], bool)
+    dtypes = X.dtypes if frame else None
+    for j in range(X.shape[1]):
+        if frame and _is_categorical(dtypes.iloc[j]):
+            out[j] = True
+            continue
+        v = X.iloc[:, j].dropna().to_numpy() if frame else X[:, j]
+        if v.dtype.kind not in "biuf":
+            v = np.asarray(v, dtype=np.float64)
+        if v.dtype.kind == "f":
+            v = v[~np.isnan(v)]
+            if not np.isfinite(v).all() or not np.all(v == np.floor(v)):
+                continue
+        if not len(v):
+            continue
+        lo, hi = int(v.min()), int(v.max())
+        if lo == hi:
+            continue
+        if hi - lo < max_levels:
+            # Integer range proves the cardinality bound, without sorting binary/count columns.
+            out[j] = True
+            continue
+        # Sparse integer codes can span an arbitrary range. Count exactly, stopping as soon as the
+        # limit is exceeded; never sort a full 50k-row column merely to reject it.
+        levels = set()
+        for start in range(0, len(v), 256):
+            levels.update(np.unique(v[start:start + 256]).tolist())
+            if len(levels) > max_levels:
+                break
+        out[j] = len(levels) <= max_levels
+    return out
 
 
 def _encode_frame(X, categories):
@@ -93,6 +146,10 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
     missing and unseen values as NaN (categories_, is_categorical_). The model was
     trained for 2-10 classes.
 
+    fit(cat="auto") also marks numeric columns with 2-20 distinct integer values as
+    categorical, using only the fit rows. This heuristic is active only with a
+    categorical adapter; cat=None preserves dtype-based DataFrame handling.
+
     n_estimators averages feature/label permutations; max_context bounds the
     stratified context per member. chunk_rows bounds prediction batches;
     chunk_cells/batch_cells control cache blocking and estimator batching.
@@ -101,12 +158,20 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
     RNG parameter; random_state is its sklearn alias (use one of them).
     fold enables equivalent inference folding. A supplied torch model is copied
     during fit, leaving the constructor parameter and its device unchanged.
+    precision="auto" uses float16 autocast on CUDA/ROCm when one member has at
+    least FP16_MIN_CELLS context cells, otherwise float32. "fp32" forces the
+    original path; "fp16" requires CUDA/ROCm. The retrieval decoder stays float32.
+    Reduced precision can change probabilities and predicted classes. precision_
+    records the fitted precision; changing precision takes effect only on refit.
+    to("cpu") converts cached tensors to float32 and sets precision_="fp32".
+    Non-finite groups/chunks silently retry in float32 (n_precision_fallbacks_,
+    cumulative since fit, with DEBUG records on the "lightpfn" logger).
     """
 
     def __init__(self, model=None, checkpoint=None, device="auto", n_estimators=4, max_context=20000,
                  chunk_rows=2048, n_threads=None, seed=0, *, chunk_cells="auto", batch_cells="auto", fold=True,
                  random_state=None, repo_id=None, revision=None, cache_dir=None, local_files_only=False,
-                 cache_context=True):
+                 cache_context=True, precision="auto"):
         self.model = model
         self.checkpoint = checkpoint
         self.device = device
@@ -124,6 +189,7 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         self.cache_dir = cache_dir
         self.local_files_only = local_files_only
         self.cache_context = cache_context
+        self.precision = precision
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
@@ -138,7 +204,10 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         # a pickle without the network (AutoGluon shared weights) keeps the key but not model_ and net_
         if getattr(self, "_backend_key", None) == key and getattr(self, "net_", None) is not None:
             return
+        self._clear_fp16_net()
         self.device_ = resolve_device(self.device)
+        if self.precision == "fp16" and kind(self.device_) != "cuda":
+            raise ValueError('precision="fp16" requires a CUDA/ROCm fit device.')
         torch_device = "cpu" if kind(self.device_) == "vulkan" else self.device_
         if self.model is not None and self.checkpoint is not None:
             raise ValueError("Provide either model or checkpoint, not both.")
@@ -163,6 +232,8 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         self._backend_key = key
 
     def _validate_parameters(self):
+        if self.precision not in ("auto", "fp32", "fp16"):
+            raise ValueError('precision must be "auto", "fp32" or "fp16".')
         for name in ("n_estimators", "max_context", "chunk_rows"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
@@ -203,9 +274,12 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         return max(1, min(self.n_estimators, self._auto(self.batch_cells, CPU_BATCH_CELLS, GPU_BATCH_CELLS) // max(1, n * m)))
 
     @torch.inference_mode()
-    def fit(self, X, y, cat=None):
+    def fit(self, X, y, cat="auto"):
         self._is_fitted = False
+        self.n_precision_fallbacks_ = 0
         self._validate_parameters()
+        auto = isinstance(cat, str) and cat == "auto"
+        auto_X = X  # detect before float32 conversion can round fractional values to integers
         self.categories_ = {}
         self._frame_columns = X.columns.copy() if _is_frame(X) else None
         if _is_frame(X):
@@ -217,7 +291,11 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         check_classification_targets(y)
         self.is_categorical_ = np.zeros(X.shape[1], bool)
         self.is_categorical_[list(self.categories_)] = True
-        if cat is not None:
+        if isinstance(cat, str):
+            if cat != "auto":
+                raise ValueError('cat must be None, "auto" or a boolean mask.')
+            cat = None
+        elif cat is not None:
             cat = np.asarray(cat)
             if cat.shape != (X.shape[1],) or cat.dtype != np.bool_:
                 raise ValueError("cat must be a boolean mask with one entry per feature.")
@@ -233,6 +311,8 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
             raise ValueError("Number of classes exceeds the model's label slots.")
         self.cat_ = None
         adapter = getattr(self.net_.cfg, "cat_adapter", False)
+        if auto and adapter:
+            cat = auto_categorical(auto_X)
         if cat is None and adapter and self.is_categorical_.any():
             self.cat_ = self.is_categorical_
         elif cat is not None and cat.any():
@@ -260,8 +340,11 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
             # plans: the plain model's draws stay the same
             plans = [(rows, feats, slots, rng.permutation(len(rows))) for rows, feats, slots, _ in plans]
         self._choose_backend(len(plans[0][0]), X.shape[1])
-        if self.cat_ is not None and kind(self.fit_device_) == "vulkan":
-            self._use_cpu("the Vulkan backend has no categorical adapter")
+        if self.precision == "fp16" and kind(self.fit_device_) != "cuda":
+            raise ValueError('precision="fp16" requires a CUDA/ROCm fit device.')
+        self.precision_ = "fp16" if kind(self.fit_device_) == "cuda" and (
+            self.precision == "fp16" or self.precision == "auto" and _fast_fp16(self.fit_device_) and
+            len(plans[0][0]) * X.shape[1] >= FP16_MIN_CELLS) else "fp32"
         self.members_ = []
         self._uncached_data = None
         if self.cache_context:
@@ -295,7 +378,48 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         elif kind(self.fit_device_) == "vulkan":
             self.fit_net_.eng.finish()
 
+    def _autocast(self):
+        # No autocast context at all on the original fp32/CPU/Vulkan paths.
+        return torch.autocast("cuda", dtype=torch.float16) if self.precision_ == "fp16" else nullcontext()
+
+    def _clear_fp16_net(self):
+        self.__dict__.pop("_fp16_net", None)
+        self.__dict__.pop("_fp16_source", None)
+
+    def __getstate__(self):
+        state = super().__getstate__().copy()
+        state.pop("_fp16_net", None)
+        state.pop("_fp16_source", None)
+        return state
+
+    def _inference_net(self):
+        """A lazy inference view: share all FP32 parameters except the Block projections.
+
+        Casting once has the same rounding as autocast's FP32 -> FP16 cast. Keep the original
+        network for retries and device moves. Direct eval-time weight mutation requires refit
+        with a fresh model (as for the folded network itself). The view is cached per source
+        network (_FP16_VIEWS): classifiers sharing one folded network share one view; a device
+        move or a replaced parameter rebuilds it, an in-place weight edit does not.
+        """
+        net = self.fit_net_
+        if (self.precision_ != "fp16" or kind(self.fit_device_) != "cuda" or
+                not getattr(net, "is_folded", False) or not fuse_enabled("halfw")):
+            return net
+        if getattr(self, "_fp16_source", None) is not net:
+            half = shared_fp16_view(net)
+            self._fp16_net, self._fp16_source = half, net
+        return self._fp16_net
+
+    def _precision_fallback(self, block):
+        self.n_precision_fallbacks_ += 1
+        logging.getLogger("lightpfn").debug("Non-finite fp16 %s; retrying in fp32", block)
+
     def _encode_members(self, X, y, plans):
+        with self._autocast():
+            self._encode_members_impl(X, y, plans)
+
+    def _encode_members_impl(self, X, y, plans):
+        net = self._inference_net()
         group = self._group(len(plans[0][0]), X.shape[1])
         if kind(self.fit_device_) == "vulkan":
             group = min(group, self.fit_net_.train_capacity(len(plans[0][0]), X.shape[1]))
@@ -310,8 +434,15 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
             if self.cat_ is not None:
                 kw["cat"] = torch.from_numpy(np.stack([self.cat_[feats] for _, feats, _, _ in part])).to(tdev)
                 kw["cat_perm"] = torch.from_numpy(np.stack([order for _, _, _, order in part])).to(tdev)
-            ctx = self.fit_net_.encode(Xt, yt, slots=st, n_classes=len(self.classes_), chunk_cells=self._chunk_cells(),
-                                       **kw)
+            ctx = net.encode(Xt, yt, slots=st, n_classes=len(self.classes_), chunk_cells=self._chunk_cells(), **kw)
+            if self.precision_ == "fp16":
+                if not _context_isfinite(ctx):
+                    self._precision_fallback("context group")
+                    with torch.autocast("cuda", enabled=False):
+                        ctx = self.fit_net_.encode(Xt, yt, slots=st, n_classes=len(self.classes_),
+                                                   chunk_cells=self._chunk_cells(), **kw)
+                # FP32 caches allow a chunk to retry without re-encoding the training set.
+                ctx = _to_device(ctx, tdev, float32=True)
             # (feature order, context): one estimator per entry as before, or (G, m) orders for a batch of G
             feats = part[0][1] if len(part) == 1 else np.stack([feats for _, feats, _, _ in part])
             self.members_.append((feats, ctx))
@@ -354,11 +485,21 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
                 self.members_.clear()
 
     def _predict_encoded(self, X):
+        with self._autocast():
+            return self._predict_encoded_impl(X)
+
+    def _predict_encoded_impl(self, X):
+        net = self._inference_net()
         P = np.zeros((len(X), len(self.classes_)))
         for feats, ctx in self.members_:
             for i in range(0, len(X), self.chunk_rows):
                 Xt = torch.from_numpy(np.stack([X[i : i + self.chunk_rows][:, f] for f in np.atleast_2d(feats)])).to(self._tensor_device())
-                probs = torch.softmax(self.fit_net_.predict_logits(ctx, Xt, self._chunk_cells()).float(), -1).cpu().numpy()
+                logits = net.predict_logits(ctx, Xt, self._chunk_cells())
+                if self.precision_ == "fp16" and not torch.isfinite(logits).all():
+                    self._precision_fallback("prediction chunk")
+                    with torch.autocast("cuda", enabled=False):
+                        logits = self.fit_net_.predict_logits(ctx, Xt, self._chunk_cells())
+                probs = torch.softmax(logits.float(), -1).cpu().numpy()
                 for p in probs:  # one estimator at a time, in float64 as before
                     P[i : i + self.chunk_rows] += p
         # float32 softmax rows sum to 1 only within ~1e-7, which sklearn's log_loss flags
@@ -380,26 +521,69 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         if kind(requested) not in ("cpu", "cuda"):
             raise ValueError("to() supports only 'cpu' or 'cuda[:i]'.")
         device = resolve_device(requested)
+        self._clear_fp16_net()
         self.model_ = self.model_.to(device)
         self.net_ = self.net_.to(device)
-        self.members_ = [(feats, _to_device(ctx, device)) for feats, ctx in self.members_]
+        self.members_ = [(feats, _to_device(ctx, device, float32=kind(device) == "cpu" and self.precision_ == "fp16"))
+                         for feats, ctx in self.members_]
+        if kind(device) == "cpu":
+            self.precision_ = "fp32"
         self.device_ = self.fit_device_ = device
         self.fit_net_ = self.net_
         self._backend_key = None
         return self
 
 
-def _to_device(obj, device):
+def _to_device(obj, device, float32=False):
     if isinstance(obj, torch.Tensor):
-        return obj.to(device)
+        return obj.to(device=device, dtype=torch.float32 if float32 and obj.is_floating_point() else obj.dtype)
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return dataclasses.replace(obj, **{f.name: _to_device(getattr(obj, f.name), device)
+        return dataclasses.replace(obj, **{f.name: _to_device(getattr(obj, f.name), device, float32)
                                            for f in dataclasses.fields(obj) if f.init})
     if isinstance(obj, dict):
-        return {k: _to_device(v, device) for k, v in obj.items()}
+        return {k: _to_device(v, device, float32) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return type(obj)(_to_device(v, device) for v in obj)
+        return type(obj)(_to_device(v, device, float32) for v in obj)
     return obj
+
+
+def _fast_fp16(device):
+    """auto uses fp16 only where tensor cores / packed fp16 make it fast: NVIDIA compute capability 7.0+
+    (and the P100, 6.0) or any ROCm GPU (gfx9+, all with packed fp16). Explicit precision="fp16" skips this."""
+    if torch.version.hip is not None:
+        return True
+    major, minor = torch.cuda.get_device_capability(torch.device(device))
+    return major >= 7 or (major, minor) == (6, 0)
+
+
+def _floating_tensors(obj, path=()):
+    if isinstance(obj, torch.Tensor) and obj.is_floating_point():
+        yield path, obj
+    elif dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        for f in dataclasses.fields(obj):
+            yield from _floating_tensors(getattr(obj, f.name), path + (f.name,))
+    elif isinstance(obj, dict):
+        for key, value in obj.items():
+            yield from _floating_tensors(value, path + (key,))
+    elif isinstance(obj, (list, tuple)):
+        for i, value in enumerate(obj):
+            yield from _floating_tensors(value, path + (i,))
+
+
+def _context_isfinite(ctx):
+    checks = []
+    for path, tensor in _floating_tensors(ctx):
+        valid = torch.isfinite(tensor)
+        # These two metadata arrays deliberately use +inf for missing values/padding.
+        # Neither is an activation produced by autocast.
+        if path == ("stats", "sorted"):
+            padding = torch.arange(tensor.shape[-1], device=tensor.device) >= ctx.stats["cnt"][..., None]
+            valid = valid | (padding & torch.isposinf(tensor))
+        elif path == ("extra", "cat_table", "keys"):
+            valid = valid | torch.isposinf(tensor)
+        checks.append(valid.all())
+    # Only the final boolean crosses to the host, once per estimator group.
+    return bool(torch.stack(checks).all()) if checks else True
 
 
 def resolve_device_was_auto(device):

@@ -36,6 +36,10 @@ def _features(counts, n_used, n_freq, prior, n, smooth):
 
 def context_stats(x, y, cat, n_classes, smooth=1.0, perm=None, generator=None):
     """x: (B, n, m) context values (NaN = missing), y: (B, n) classes in 0..n_classes-1, cat: (B, m) bool.
+    Regression (Config.head="quantiles"): y is a float (B, n, n_classes) tensor of target values (the
+    normalized target, n_classes 1); the statistics are then the shrunk deviation of the category's mean
+    target from the context mean (zero in these units). This fixed zero prior does not feed a row's own
+    target back into its ordered statistic through an empirical prior.
     perm: (B, n) the row order of the ordered statistics. Default: random per task from the global RNG, or,
     with a generator, one order drawn from it for every task (the same whatever the batch).
 
@@ -61,8 +65,16 @@ def context_stats(x, y, cat, n_classes, smooth=1.0, perm=None, generator=None):
     kp = torch.gather(keys, 1, pe)
     vs, order = torch.sort(kp, dim=1, stable=True)  # stable: rows of a category keep the random order
     rows = torch.gather(pe, 1, order)  # original row of every sorted position
-    ys = torch.gather(y.long()[..., None].expand(B, n, mc), 1, rows)
-    oh = F.one_hot(ys, C).float()  # (B, n, mc, C)
+    regression = y.ndim == 3 and y.is_floating_point()
+    if regression:
+        if y.shape != (B, n, C):
+            raise ValueError("float targets must be (B, n, n_classes)")
+        # One more channel of ones: the table must count rows, which the target sums do not (query_stats).
+        yc = torch.cat([y.float(), torch.ones_like(y[..., :1], dtype=torch.float32)], -1)
+        oh = torch.gather(yc[:, :, None].expand(B, n, mc, C + 1), 1, rows[..., None].expand(B, n, mc, C + 1))
+    else:
+        ys = torch.gather(y.long()[..., None].expand(B, n, mc), 1, rows)
+        oh = F.one_hot(ys, C).float()  # (B, n, mc, C)
     start = torch.ones_like(vs, dtype=torch.bool)
     start[:, 1:] = vs[:, 1:] != vs[:, :-1]
     end = torch.ones_like(start)
@@ -82,19 +94,20 @@ def context_stats(x, y, cat, n_classes, smooth=1.0, perm=None, generator=None):
     bi, ri, ci = torch.where(end & valid[:, None])
     ki = category[bi, ri, ci]
     table_keys = torch.full((B, mc, n_keys), math.inf, device=dev)
-    table_total = torch.zeros(B, mc, n_keys, C, device=dev)
+    table_total = torch.zeros(B, mc, n_keys, C + int(regression), device=dev)
     table_keys[bi, ci, ki] = vs[bi, ri, ci]
     table_total[bi, ci, ki] = incl[bi, ri, ci] - base[bi, ri, ci]
     del incl, excl, base
-    prior = F.one_hot(y.long(), C).float().mean(1)[:, None, None]  # (B, 1, 1, C)
+    prior = (torch.zeros(B, 1, 1, C, device=dev) if regression else
+             F.one_hot(y.long(), C).float().mean(1)[:, None, None])  # (B, 1, 1, C)
     n_used = (ar - first).float()
-    feats = _features(prefix, n_used, (last - first).float(), prior, n, smooth) * valid[:, None, :, None]
+    feats = _features(prefix[..., :C], n_used, (last - first).float(), prior, n, smooth) * valid[:, None, :, None]
     out = torch.zeros(B, n, mc, feats.shape[-1], device=dev)
     out.scatter_(1, rows[..., None].expand_as(feats), feats)
     full = torch.zeros(B, n, m, feats.shape[-1], device=dev)
     full.scatter_(2, cols[:, None, :, None].expand_as(out), out)  # cols is a permutation prefix: no repeats
-    table = dict(cols=cols, valid=valid, keys=table_keys,
-                 total=table_total, prior=prior, n=n, smooth=smooth)
+    table = dict(cols=cols, valid=valid, keys=table_keys, total=table_total, prior=prior, n=n, smooth=smooth,
+                 count_channel=regression)
     return full, table
 
 
@@ -109,7 +122,10 @@ def query_stats(table, x):
     pos = torch.searchsorted(keys, q).clamp(max=n_keys - 1)
     hit = torch.gather(keys, 2, pos) == q
     counts = torch.gather(total, 2, pos[..., None].expand(B, mc, M, C)) * hit[..., None]
-    n_used = counts.sum(-1)
+    if table.get("count_channel"):  # regression: target sums, then the row count
+        counts, n_used = counts[..., :-1], counts[..., -1]
+    else:
+        n_used = counts.sum(-1)
     feats = _features(counts, n_used, n_used, table["prior"], table["n"], table["smooth"])
     feats = (feats * valid[:, :, None, None]).transpose(1, 2)  # (B, M, mc, F)
     full = torch.zeros(B, M, m, feats.shape[-1], device=x.device)

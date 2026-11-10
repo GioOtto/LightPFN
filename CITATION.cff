@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use LightPFN, please cite the technical report."
+message: "If you use LightPFN 1.5, please cite its technical report below; the 1.1 report is listed under references."
 title: "LightPFN"
 type: software
 authors:
@@ -8,19 +8,28 @@ authors:
 license: Apache-2.0
 repository-code: "https://github.com/GioOtto/LightPFN"
 url: "https://github.com/GioOtto/LightPFN"
-version: 1.1.0
-date-released: "2026-10-09"
+version: 1.5.0
+date-released: "2026-11-09"
 keywords:
   - tabular data
   - classification
+  - regression
   - in-context learning
   - foundation model
   - prior-data fitted network
 preferred-citation:
   type: report
-  title: "A Sling Against Giants: LightPFN, a 4.6M-parameter tabular in-context classifier designed to stay small"
+  title: "LightPFN 1.5: Native categoricals, quantile regression, and fast portable inference under 5 million parameters"
   authors:
     - family-names: Ottoboni
       given-names: Giorgio
   year: 2026
-  url: "https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN_report.pdf"
+  url: "https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN15_report.pdf"
+references:
+  - type: report
+    title: "A Sling Against Giants: LightPFN, a 4.6M-parameter tabular in-context classifier designed to stay small"
+    authors:
+      - family-names: Ottoboni
+        given-names: Giorgio
+    year: 2026
+    url: "https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN_report.pdf"

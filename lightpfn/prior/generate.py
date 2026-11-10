@@ -3,18 +3,25 @@
 A group shares its sampled row count, requested width and train fraction. Resampling selects
 exactly that many row indices without replacement; repeated values are allowed. Shards contain float16 features,
 uint8 contiguous labels, true widths and generation diagnostics. The priors are described in the technical report.
+Typed pools (--typed, graph v3) also store which columns are categorical and their raw level IDs, taken before any
+scaling; their X/y stay bit-identical to the legacy pool of the same seed. The additive prior (lightpfn.prior.additive)
+is always typed.
 """
 
 import argparse
 import collections
 from contextlib import contextmanager
-import fcntl
 import importlib
 import importlib.metadata
 import json
 import math
 import multiprocessing as mp
 import os
+try:
+    import fcntl
+except ImportError:  # Windows: pool lock through msvcrt, no directory fsync (test runs only)
+    fcntl = None
+    import msvcrt
 from pathlib import Path
 import platform
 import random
@@ -40,15 +47,24 @@ MAX_ABS_X = 1000.0
 ROWS_PER_FEATURE = 8
 P_UNCAPPED = 0.1
 RATIO_BANDS = [(0.7, 0.01, 0.06), (0.2, 0.06, 0.15), (0.1, 0.15, 0.5)]
-PRIORS = ["graph", "tree", "rule"]  # append: legacy seed coordinates must not change
+PRIORS = ["graph", "tree", "rule", "additive"]  # append: legacy seed coordinates must not change
 # Remove constant features, retain duplicates, and rank-match resampling quotas.
-PRIOR_VERSIONS = {"graph": 4, "tree": 4, "rule": 1}
-SUPPORTED_VERSIONS = {"graph": (3, 4), "tree": (4,), "rule": (1,)}
-DEFAULT_VERSIONS = {"graph": 3, "tree": 4, "rule": 1}
+PRIOR_VERSIONS = {"graph": 4, "tree": 4, "rule": 1, "additive": 1}
+SUPPORTED_VERSIONS = {"graph": (3, 4), "tree": (4,), "rule": (1,), "additive": (1,)}
+DEFAULT_VERSIONS = {"graph": 3, "tree": 4, "rule": 1, "additive": 1}
+MAX_LEVELS = np.iinfo(np.int16).max  # stored level IDs (cat_codes) are int16, -1 = no column
 FILTER_TRIES = 63  # initial draft plus retries; every draft is checked, never force-accepted
 MAX_TASK_DRAFTS = 128  # also bounds structural failures (constant columns, missing classes, ...)
 MAX_GRAPH_DRAWS = 128
 SEED_SCHEME = "seedsequence-coordinate-v1"
+# Immutable source identities of the reviewed P0 byte stream (before the opt-in r2 additions).
+# Keep its manifest bit-identical so existing P0 pools can resume. r2 records the actual current sources below.
+P0_REGRESSION_SOURCES = {
+    "generate.py": "831ad9c7f784851d10551851af185e5585ceb7279889d9c6765238f39641a6c8",
+    "regression.py": "fea778ed53ee0354d3417224acb173899a45bade60e8ca129bef5226396b862c",
+    "observation.py": "f5abb5b06062964e97eda8fb400c6f43a719f0089fa8950f5c76a0510bbce2c7",
+    "reg_scm.py": "db24d6586667bd568596743b4a4651e60f415137c5dbbb68ca7b74e5f886a5f8",
+}
 
 
 def _prior():
@@ -112,18 +128,29 @@ def _graph_dataset(spec, n_gen):
     from tabicl.prior._reg2cls import outlier_removing, standard_scaling
 
     cfg = _PRIOR if _PRIOR is not None else _prior()
+    if spec.get("task") == "regression":
+        from dataclasses import replace
+        # Fit the SCM transforms on a separate draw, then transform fresh rows.
+        # The disjoint calibration rows returned with the task can then define
+        # observation units/thresholds without fitting on the task's targets.
+        cfg = replace(cfg, ensure_iid=True, add_gaussian_noise=False)
     modern = spec.get("prior_version", DEFAULT_VERSIONS[spec["prior"]]) != 3
     if modern:
         from lightpfn.prior.v4 import CONFIG
         if np.random.random() < CONFIG["softmax_only_probability"]:
             from dataclasses import replace
             cfg = replace(cfg, cat_modes="softmax")
-    context = Context(config=cfg, device="cpu")
+    if spec.get("task") == "regression":
+        from .reg_scm import context as regression_context
+        context, operator_counts = regression_context(cfg)
+    else:
+        context = Context(config=cfg, device="cpu")
     d = spec["n_features"]
     properties = DatasetProperties(
         n_train=n_gen, n_test=0,
         cat_sizes={"x": sample_categorical_sizes(d, context, max_cat_size=200),
-                   "y": [0 if spec.get("balanced_target", False) else spec["n_classes"]]},
+                   "y": [0 if spec.get("balanced_target", False) or spec.get("task") == "regression"
+                         else spec["n_classes"]]},
     )
     sampler = RandomDataset(context).sampler
     for _ in range(MAX_GRAPH_DRAWS):
@@ -150,6 +177,8 @@ def _graph_dataset(spec, n_gen):
         raise RuntimeError("TabICLv2: graph connectivity retries exhausted")
     fn = RandomGraphFunction(context, dag=graph, node_feature_specs=node_specs)
     if cfg.ensure_iid:
+        # RegressionContext keeps root-source transforms/parameters persistent:
+        # all sample-dependent fits happen here, never on the fresh task rows.
         fn(n_gen)
     data = Dataset(tensors=fn(n_gen), feature_specs=properties.feature_specs,
                    graph=graph, n_train=n_gen).get_concat_tensors()
@@ -161,6 +190,31 @@ def _graph_dataset(spec, n_gen):
         X = standard_scaling(outlier_removing(X, threshold=4))
     order = torch.randperm(d)
     X = X[:, order]
+    codes = None
+    if spec.get("typed") and not modern:
+        # Raw level IDs of the categorical columns, before outlier clipping and scaling; -1 = numerical.
+        # No random draw: the legacy stream is unchanged.
+        raw = np.full((n_gen, d), -1, dtype=np.int64)
+        if "x_cat" in data:
+            raw[:, :data["x_cat"].shape[1]] = data["x_cat"].reshape(n_gen, -1).long().numpy()
+        codes = raw[:, order.numpy()]
+    if spec.get("task") == "regression":
+        # A separate exporter, before class conversion/relabeling. No draw on
+        # the legacy classification branch. _prior disables node noise.
+        if modern:
+            # Graph v4 (regression recipe r2): the categorical values in X are exact level identities (the
+            # graph's own categories and the quantized high-cardinality columns), as typed_codes reads them in
+            # training. Codes are the rank of each distinct value over all generated rows, calibration included,
+            # so a level keeps its code across the task/calibration split. No random draw.
+            cat = info["cat_mask"][order.numpy()]
+            Xn = X.numpy()
+            codes = np.full(Xn.shape, -1, dtype=np.int64)
+            # Do not manufacture a valid category ID for NaN/Inf. The exporter will count nonfinite_base
+            # before inspecting these sentinel codes; neither X nor the failure is silently repaired.
+            if np.isfinite(Xn).all():
+                for j in np.flatnonzero(cat):
+                    codes[:, j] = np.unique(Xn[:, j], return_inverse=True)[1]
+        return X.numpy(), data["y_num"].reshape(-1).double().numpy(), codes, operator_counts
     if spec.get("balanced_target", False):
         signal = data["y_num"].view(-1).double().numpy()
         cuts = np.quantile(signal, np.arange(1, spec["n_classes"])/spec["n_classes"])
@@ -173,6 +227,8 @@ def _graph_dataset(spec, n_gen):
         info["cat_mask"] = info["cat_mask"][order.numpy()]
         info["config"] = cfg
         return X.numpy(), y.numpy(), info
+    if codes is not None:
+        return X.numpy(), y.numpy(), codes
     return X.numpy(), y.numpy()
 
 
@@ -250,12 +306,24 @@ def generate_task(spec):
     Filter the quantized source. Resampled tasks retain this source-level signal guarantee:
     the final OOB Brier test is an audit, not a second gate penalizing rare classes (see review).
     """
+    if spec.get("task") == "regression":
+        from lightpfn.prior.regression import generate_regression_task
+        return generate_regression_task(spec)
+    if "lookup_probability" in spec:
+        # Opt-in post-processing with its own seed namespace: the base task is the task without the flag.
+        from lightpfn.prior.lookup import add_lookup_column
+        base = {k: v for k, v in spec.items() if k != "lookup_probability"}
+        return add_lookup_column(generate_task(base), base, spec["lookup_probability"])
     version = spec.get("prior_version", DEFAULT_VERSIONS.get(spec["prior"]))
     if version not in SUPPORTED_VERSIONS.get(spec["prior"], ()):
         raise ValueError("unsupported prior version")
     if spec["prior"] == "rule" or (spec["prior"] == "graph" and version == 4):
         from lightpfn.prior.v4 import generate_modern_task
         return generate_modern_task(spec)
+    if spec["prior"] == "additive":
+        from lightpfn.prior.additive import generate_additive_task
+        return generate_additive_task(spec)
+    typed = bool(spec.get("typed")) and spec["prior"] == "graph"
     n, d, C = (spec[k] for k in ("n_rows", "n_features", "n_classes"))
     if (any(not isinstance(v, (int, np.integer)) for v in (n, d, C))
             or spec["prior"] not in PRIORS or not 1 <= d <= np.iinfo(np.int16).max
@@ -267,13 +335,19 @@ def generate_task(spec):
     n_gen = 2 * n if requested else n
     rejected = invalid = checks = 0
     for draft in range(1, MAX_TASK_DRAFTS + 1):
-        X, y = _base_dataset(rng, spec, n_gen)
+        source = _base_dataset(rng, spec, n_gen)
+        X, y = source[:2]
         # Check raw shapes before indexing: a malformed source must use the bounded
         # structural retry path rather than raise IndexError during its shuffle.
         clean = _clean_candidate(X, y, spec)
         if clean is None:
             invalid += 1
             continue
+        codes = None
+        if typed:
+            # The same columns as _clean_candidate keeps (float16 constants dropped).
+            X16 = np.asarray(X).astype(np.float16)
+            codes = source[2][:, X16.min(0) != X16.max(0)]
         X, y = clean
         counts = np.bincount(y, minlength=C)
         if len(y) < n or np.any(counts < 2):
@@ -281,6 +355,8 @@ def generate_task(spec):
             continue
         perm = rng.permutation(len(y))
         X, y = X[perm], y[perm]
+        if codes is not None:
+            codes = codes[perm]
         checks += 1
         if _unpredictable(X, y):
             rejected += 1
@@ -304,14 +380,19 @@ def generate_task(spec):
             idx = _select_rows(rng, y, take)
         X, y = X[idx], y[idx]
         # A selected subset can lose rare categories. Remove its constant columns too.
-        X = X[:, X.min(0) != X.max(0)]
+        keep = X.min(0) != X.max(0)
+        X = X[:, keep]
         if X.shape[1] == 0:
             invalid += 1
             continue
         y = rng.permutation(C)[y]
-        return dict(X=X, y=y.astype(np.uint8), n_features=d, resampled=resampled,
+        task = dict(X=X, y=y.astype(np.uint8), n_features=d, resampled=resampled,
                     resample_requested=bool(requested), rejected=rejected, invalid=invalid,
                     drafts=draft, filter_checks=checks)
+        if codes is not None:
+            codes = codes[idx][:, keep]
+            task.update(cat_mask=codes[0] >= 0, cat_codes=codes)
+        return task
     raise RuntimeError(f"structural retries exhausted: {spec}, invalid={invalid}, rejected={rejected}")
 
 
@@ -341,6 +422,9 @@ def stratified_split(rng, y, n_rows, n_train):
 
 
 def assemble_group(rng, tasks, train_frac):
+    if any("y_reg" in t for t in tasks):
+        from lightpfn.prior.regression import assemble_regression_group
+        return assemble_regression_group(rng, tasks, train_frac)
     if not tasks or not 0 < train_frac < 1:
         raise ValueError("empty group or invalid train fraction")
     n_rows = len(tasks[0]["y"])
@@ -358,6 +442,7 @@ def assemble_group(rng, tasks, train_frac):
     X = np.zeros((G, n_rows, d_max), dtype=np.float16)
     Y = np.zeros((G, n_rows), dtype=np.uint8)
     d, n_classes = np.zeros(G, dtype=np.int16), np.zeros(G, dtype=np.int16)
+    selections = []
     for g, t in enumerate(tasks):
         sel = stratified_split(rng, t["y"], n_rows, n_train)
         if "rule_meta" in t:
@@ -368,6 +453,7 @@ def assemble_group(rng, tasks, train_frac):
                 sel = stratified_split(rng, t["y"], n_rows, n_train)
             else:
                 raise ValueError("rule signal split retries exhausted")
+        selections.append(sel)
         X[g, :, :t["X"].shape[1]] = t["X"][sel]
         _, Y[g] = np.unique(t["y"][sel], return_inverse=True)
         d[g], n_classes[g] = t["X"].shape[1], len(np.unique(Y[g]))
@@ -379,9 +465,29 @@ def assemble_group(rng, tasks, train_frac):
         for i, t in enumerate(tasks):
             mask[i, :int(d[i])] = t["cat_mask"]
         group["cat_mask"] = torch.from_numpy(mask)
-        group["unclipped_mode"] = [t["unclipped_mode"] for t in tasks]
+        if all("unclipped_mode" in t for t in tasks):
+            group["unclipped_mode"] = [t["unclipped_mode"] for t in tasks]
         for key in ("trivial_rejected", "balance_rejected", "oob_auc"):
-            group[key] = torch.tensor([t[key] for t in tasks])
+            if all(key in t for t in tasks):
+                group[key] = torch.tensor([t[key] for t in tasks])
+    if all("cat_codes" in t for t in tasks):
+        # Level IDs of the categorical columns only, in column order: (G, n, max categorical columns), -1 padding.
+        width = max(1, int(group["cat_mask"].sum(1).max()))
+        codes = np.full((G, n_rows, width), -1, dtype=np.int16)
+        for i, (t, sel) in enumerate(zip(tasks, selections)):
+            raw = t["cat_codes"][sel][:, t["cat_mask"]]
+            codes[i, :, :raw.shape[1]] = raw
+        group["cat_codes"] = torch.from_numpy(codes)
+    for key in ("additive_meta", "additive_oracle"):
+        if all(key in t for t in tasks):
+            if key == "additive_meta":
+                group[key] = [t[key] for t in tasks]
+            else:
+                C = max(t[key].shape[1] for t in tasks)
+                oracle = np.zeros((G, n_rows, C), dtype=np.float16)
+                for i, (t, sel) in enumerate(zip(tasks, selections)):
+                    oracle[i, :, :t[key].shape[1]] = t[key][sel]
+                group[key] = torch.from_numpy(oracle)
     if all("rule_meta" in t for t in tasks):
         group["rule_meta"] = [t["rule_meta"] for t in tasks]
         from lightpfn.prior.rules import evaluate_rule
@@ -390,12 +496,18 @@ def assemble_group(rng, tasks, train_frac):
     for key in ("resample_requested", "rejected", "invalid", "drafts", "filter_checks"):
         if all(key in t for t in tasks):
             group[key] = torch.tensor([t[key] for t in tasks])
+    for key, dtype in (("lookup_column", torch.int16), ("lookup_levels", torch.int16), ("lookup_typed", torch.bool)):
+        if all(key in t for t in tasks):
+            group[key] = torch.tensor([t[key] for t in tasks], dtype=dtype)
     validate_group(group)
     return group
 
 
 def validate_group(g, *, preset=None, max_features=None, group_size=None):
     """Stored-shard contract. Also usable to audit existing pools without modifying them."""
+    if "y_reg" in g:
+        from lightpfn.prior.regression import validate_regression_group
+        return validate_regression_group(g, preset=preset, max_features=max_features, group_size=group_size)
     X, y, d, nc = (g[k] for k in ("X", "y", "d", "n_classes"))
     if (not all(torch.is_tensor(v) for v in (X, y, d, nc)) or X.ndim != 3
             or y.shape != X.shape[:2] or X.dtype != torch.float16 or y.dtype != torch.uint8):
@@ -439,7 +551,7 @@ def validate_group(g, *, preset=None, max_features=None, group_size=None):
         if key in g and (g[key].dtype != torch.int64 or bool((g[key] < 0).any())):
             raise ValueError(f"invalid {key} diagnostics")
     if all(k in g for k in ("rejected", "invalid", "drafts", "filter_checks")):
-        minimum_checks = g["rejected"] + (0 if "rule_meta" in g else 1)
+        minimum_checks = g["rejected"] + (0 if "rule_meta" in g or "additive_meta" in g else 1)
         if (not torch.equal(g["drafts"], g["rejected"] + g["invalid"] + 1)
                 or bool((g["filter_checks"] < minimum_checks).any())
                 or bool((g["filter_checks"] > g["drafts"]).any())
@@ -453,6 +565,41 @@ def validate_group(g, *, preset=None, max_features=None, group_size=None):
         for i, di in enumerate(d):
             if bool(mask[i, int(di):].any()):
                 raise ValueError("categorical padding is not zero")
+    if "cat_codes" in g:
+        codes = g["cat_codes"]
+        if ("cat_mask" not in g or not torch.is_tensor(codes) or codes.dtype != torch.int16
+                or codes.ndim != 3 or codes.shape[:2] != (B, n)):
+            raise ValueError("invalid categorical codes")
+        for i in range(B):
+            k = int(g["cat_mask"][i].sum())
+            if (k > codes.shape[2] or bool((codes[i, :, :k] < 0).any()) or bool((codes[i, :, k:] != -1).any())
+                    or any(len(torch.unique(codes[i, :, j])) < 2 for j in range(k))):
+                raise ValueError("categorical codes disagree with the mask or are constant")
+    if any(k in g for k in ("lookup_column", "lookup_levels", "lookup_typed")):
+        col, levels, typed = (g.get(k) for k in ("lookup_column", "lookup_levels", "lookup_typed"))
+        if (not all(torch.is_tensor(t) for t in (col, levels, typed)) or "cat_mask" not in g
+                or any(t.shape != (B,) for t in (col, levels, typed)) or typed.dtype != torch.bool
+                or col.dtype != torch.int16 or levels.dtype != torch.int16):
+            raise ValueError("invalid lookup diagnostics")
+        for i in range(B):
+            j = int(col[i])
+            if j < 0:
+                if j != -1 or int(levels[i]) or bool(typed[i]):
+                    raise ValueError("lookup diagnostics without a lookup column")
+            elif (j >= int(d[i]) or bool(g["cat_mask"][i, j]) != bool(typed[i])
+                    or not 2 <= len(torch.unique(X[i, :, j])) <= int(levels[i])):
+                raise ValueError("lookup column disagrees with the mask or its levels")
+    if "additive_meta" in g:
+        if len(g["additive_meta"]) != B or bool((g["filter_checks"] != 0).any()) or bool(g["resample_requested"].any()):
+            raise ValueError("invalid additive metadata/diagnostics")
+        for i, meta in enumerate(g["additive_meta"]):
+            if (meta["n_classes"] != int(nc[i]) or not meta["drivers"]
+                    or any(not isinstance(j, int) or not 0 <= j < int(d[i]) for j in meta["drivers"])):
+                raise ValueError("invalid additive drivers/classes")
+        if "additive_oracle" in g:
+            oracle = g["additive_oracle"]
+            if oracle.shape[:2] != (B, n) or oracle.dtype != torch.float16 or not bool(torch.isfinite(oracle).all()):
+                raise ValueError("invalid additive oracle")
     if "rule_meta" in g:
         from lightpfn.prior.rules import evaluate_rule
         if len(g["rule_meta"]) != B or g["rule_oracle"].shape != (B, n) or g["rule_oracle"].dtype != torch.uint8:
@@ -481,13 +628,19 @@ def validate_group(g, *, preset=None, max_features=None, group_size=None):
                 raise ValueError("rule has insufficient test signal")
 
 
-def sample_n_features(rng, n_rows, max_features, geometry):
+def sample_n_features(rng, n_rows, max_features, geometry, min_features=None):
+    """min_features (cap geometry only, opt-in for wide pools): lower end of the log-uniform draw, clipped to
+    the row cap; None keeps the draws exactly as before."""
     if n_rows < 1 or not 1 <= max_features <= np.iinfo(np.int16).max:
         raise ValueError("invalid feature/row limits")
     low = min(2, max_features)
     if geometry == "cap":
         high = max_features if rng.random() < P_UNCAPPED else min(max_features, max(4, n_rows // ROWS_PER_FEATURE))
+        if min_features is not None:
+            low = min(max(low, min_features), high)
         return int(round(math.exp(rng.uniform(math.log(low), math.log(high)))))
+    if min_features is not None:
+        raise ValueError("min_features applies to the cap geometry")
     if geometry != "ratio":
         raise ValueError("unknown geometry")
     probs, lows, highs = zip(*RATIO_BANDS)
@@ -496,7 +649,8 @@ def sample_n_features(rng, n_rows, max_features, geometry):
     return int(min(max_features, max(low, round(ratio * n_rows))))
 
 
-def group_specs(rng, preset, max_features, base_seed, prior, geometry="cap", p_binary=P_BINARY, max_cells=None):
+def group_specs(rng, preset, max_features, base_seed, prior, geometry="cap", p_binary=P_BINARY, max_cells=None,
+                min_features=None):
     """max_cells caps rows x features: long tables draw from a narrower feature range. None leaves the
     draws exactly as before (existing pools resume and validate unchanged)."""
     if (not np.isfinite(p_binary) or not 0 <= p_binary <= 1 or prior not in PRIORS
@@ -507,7 +661,7 @@ def group_specs(rng, preset, max_features, base_seed, prior, geometry="cap", p_b
     n_rows = round(math.exp(rng.uniform(math.log(preset["n_min"]), math.log(preset["n_max"]))))
     if max_cells is not None:
         max_features = min(max_features, max(2, max_cells // n_rows))
-    d = sample_n_features(rng, n_rows, max_features, geometry)
+    d = sample_n_features(rng, n_rows, max_features, geometry, min_features)
     frac = rng.uniform(preset["train_min"], preset["train_max"])
     specs = []
     for g in range(preset["group_size"]):
@@ -523,11 +677,25 @@ def shard_specs(args, shard, n_groups):
         coords = coordinate_seed(args.seed, args.prior, shard, gi, domain=1)
         s, frac = group_specs(np.random.default_rng(coords), preset, args.max_features,
                               coordinate_seed(args.seed, args.prior, shard, gi, domain=2),
-                              args.prior, args.geometry, args.p_binary, getattr(args, "max_cells", None))
+                              args.prior, args.geometry, args.p_binary, getattr(args, "max_cells", None),
+                              getattr(args, "min_features", None))
         specs.extend(s)
         fractions.append(frac)
     for s in specs:
         s["prior_version"] = getattr(args, "prior_version", DEFAULT_VERSIONS[args.prior])
+        if getattr(args, "task", None) == "regression":
+            s.update(task="regression", typed=True)
+            # Separate namespace for targets and their observation mechanisms.
+            s["seed"] = [*s["seed"], 0x52454731]
+            if getattr(args, "reg_factors", None):
+                # Same seed for every factor set: arms share their first SCM draft and observation draws.
+                s["reg_factors"] = list(args.reg_factors)
+        if getattr(args, "typed", False):
+            s["typed"] = True
+        if getattr(args, "audit", False):
+            s["audit"] = True
+        if hasattr(args, "lookup_probability"):
+            s["lookup_probability"] = args.lookup_probability
     return specs, fractions
 
 
@@ -557,6 +725,41 @@ def generator_meta(args):
         from dataclasses import asdict
         from lightpfn.prior.v4 import CONFIG
         extra = dict(prior_config=asdict(_prior()), modern_config=CONFIG)
+    if args.prior == "additive":
+        from lightpfn.prior.additive import CONFIG
+        extra = dict(additive_config=CONFIG)
+    if hasattr(args, "lookup_probability"):
+        from lightpfn.prior.lookup import CONFIG as LOOKUP
+        extra["lookup_config"] = LOOKUP
+    if getattr(args, "task", None) == "regression":
+        import hashlib
+        from dataclasses import asdict, replace
+        from lightpfn.prior.observation import VERSION, CHANNELS, QUOTAS, RANGES, STORAGE_POLICY
+        from lightpfn.prior.regression import CALIBRATION_ROWS, UNIT_POLICY, STRUCTURAL_POLICY
+        from lightpfn.prior.reg_scm import POLICY
+        extra.update(regression_schema=1, observation_version=VERSION,
+                     observation_channels=CHANNELS, observation_quotas=QUOTAS, observation_ranges=RANGES,
+                     graph_noise="disabled", regression_export="calibrated-location-v2",
+                     location_unit_policy=UNIT_POLICY, scm_operator_policy=POLICY,
+                     regression_structural_policy=STRUCTURAL_POLICY,
+                     observation_storage_policy=STORAGE_POLICY,
+                     calibration_rows=CALIBRATION_ROWS,
+                     prior_config=asdict(replace(_prior(), ensure_iid=True, add_gaussian_noise=False)))
+        if getattr(args, "reg_factors", None):
+            from lightpfn.prior.observation import FACTORS, VERSION_R2, QUOTAS_TAILS, RANGES_R2
+            from lightpfn.prior.regression import STRUCTURAL_POLICY_R2
+            extra.update(regression_export="calibrated-location-r2",
+                         observation_version=VERSION_R2 if set(args.reg_factors) & set(FACTORS) else VERSION,
+                         observation_quotas=QUOTAS_TAILS if "tails" in args.reg_factors else QUOTAS,
+                         observation_quotas_tails=QUOTAS_TAILS, observation_ranges_r2=RANGES_R2,
+                         regression_structural_policy=STRUCTURAL_POLICY_R2)
+            if args.prior_version == 4:
+                from lightpfn.prior.v4 import CONFIG
+                extra["modern_config"] = CONFIG
+        extra["regression_source_sha256"] = {
+            name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
+            for name in ("generate.py", "regression.py", "observation.py", "reg_scm.py")
+        } if getattr(args, "reg_factors", None) else dict(P0_REGRESSION_SOURCES)
     return json.loads(json.dumps(dict(vars(args), preset_cfg=PRESETS[args.preset],
         p_resample=P_RESAMPLE, max_classes=MAX_CLASSES, label_slots=LABEL_SLOTS, max_abs_x=MAX_ABS_X,
         rows_per_feature=ROWS_PER_FEATURE, p_uncapped=P_UNCAPPED, ratio_bands=RATIO_BANDS,
@@ -600,6 +803,8 @@ def check_resume(out, meta):
             if i < len(files) - 1 and len(groups) != meta["groups_per_shard"]:
                 raise ValueError("only the last shard may be partial")
             for gi, g in enumerate(groups):
+                if ("y_reg" in g) != (meta.get("task") == "regression"):
+                    raise ValueError("shards must be homogeneous and agree with pool task")
                 validate_group(g, preset=meta["preset_cfg"], max_features=meta["max_features"],
                                group_size=meta["preset_cfg"]["group_size"])
                 # Detect a valid shard accidentally copied/renamed from other coordinates.
@@ -607,8 +812,24 @@ def check_resume(out, meta):
                     np.random.default_rng(coordinate_seed(meta["seed"], meta["prior"], i, gi, domain=1)),
                     meta["preset_cfg"], meta["max_features"],
                     coordinate_seed(meta["seed"], meta["prior"], i, gi, domain=2),
-                    meta["prior"], meta["geometry"], meta["p_binary"], meta.get("max_cells"))
+                    meta["prior"], meta["geometry"], meta["p_binary"], meta.get("max_cells"),
+                    meta.get("min_features"))
                 n, d = specs[0]["n_rows"], specs[0]["n_features"]
+                if meta.get("task") == "regression":
+                    if meta.get("reg_factors") and any(
+                            t.get("reg_factors") != meta["reg_factors"]
+                            or t.get("family") != f"graph_v{meta['prior_version']}"
+                            or t.get("export_version") != 3 for t in g["regression_meta"]):
+                        raise ValueError("regression shard disagrees with declared r2 recipe")
+                    if not meta.get("reg_factors") and any(t.get("export_version") != 2
+                                                          for t in g["regression_meta"]):
+                        raise ValueError("r2 shard in a P0 regression pool")
+                    if (g["X"].shape[1:] != (n, d) or
+                            g["n_train"] != min(max(round(frac * n), 1), n - 1) or
+                            [t["task_id"] for t in g["regression_meta"]] !=
+                            [[*s["seed"], 0x52454731] for s in specs]):
+                        raise ValueError("regression shard disagrees with seeded geometry")
+                    continue
                 classes = torch.tensor([s["n_classes"] for s in specs], dtype=torch.int16)
                 Cmax = int(classes.max())
                 if (g["X"].shape[1:] != (n, d) or not bool((g["d"] <= d).all())
@@ -630,6 +851,8 @@ def atomic_write(path, writer):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    if fcntl is None:
+        return
     fd = os.open(path.parent, os.O_DIRECTORY)
     try:
         os.fsync(fd)
@@ -641,7 +864,13 @@ def atomic_write(path, writer):
 def pool_lock(out):
     with (out / ".generate.lock").open("a") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl is not None:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError as exc:
+                    raise BlockingIOError(str(exc)) from exc
         except BlockingIOError as exc:
             raise ValueError("another generator holds the pool lock") from exc
         yield
@@ -651,6 +880,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--preset", choices=list(PRESETS), default="s1")
     p.add_argument("--prior", choices=PRIORS, default="graph")
+    p.add_argument("--task", choices=["classification", "regression"], default="classification")
     p.add_argument("--prior-version", type=int, default=None,
                    help="graph: 3 (legacy default) or 4; tree: 4; rule: 1")
     p.add_argument("--geometry", choices=["cap", "ratio"], default="cap")
@@ -659,6 +889,8 @@ def main():
     p.add_argument("--n-tasks", type=int, default=256_000)
     p.add_argument("--groups-per-shard", type=int, default=32)
     p.add_argument("--max-features", type=int, default=100)
+    p.add_argument("--min-features", type=int, default=None,
+                   help="cap geometry: lower end of the log-uniform feature draw (wide pools); default: 2")
     p.add_argument("--max-cells", type=int, default=None,
                    help="cap on rows x features per task (long tables get fewer features); default: none")
     p.add_argument("--n-jobs", type=int, default=8)
@@ -666,7 +898,55 @@ def main():
     p.add_argument("--min-free-gb", type=float, default=200.0)
     p.add_argument("--lookahead", type=int, default=4,
                    help="shards in flight: workers start the next shards while one waits for its slowest task")
+    p.add_argument("--typed", action="store_true",
+                   help="graph v3: also store the categorical mask and raw level IDs (X/y unchanged)")
+    p.add_argument("--audit", action="store_true",
+                   help="additive: oracle probabilities; regression: latent SCM location (audit only)")
+    p.add_argument("--reg-factors", default="",
+                   help="regression recipe r2 (2026-11-05): comma list of filter,noise,tails,discrete; graph v4 needs "
+                        "at least one; empty keeps the reviewed P0 exporter unchanged")
+    p.add_argument("--lookup-probability", type=float, default=0.0,
+                   help="graph v4 / typed v3 classification: share of tasks given a high-cardinality lookup column "
+                        "(lightpfn.prior.lookup); 0 leaves the pool unchanged")
     args = p.parse_args()
+    factors = sorted(f.strip() for f in args.reg_factors.split(",") if f.strip())
+    if len(factors) != len(set(factors)):
+        p.error("--reg-factors must not contain duplicates")
+    if args.task == "regression":
+        from lightpfn.prior.regression import REG_FACTORS
+        if any(f not in REG_FACTORS for f in factors):
+            p.error(f"--reg-factors: choose among {','.join(REG_FACTORS)}")
+        if args.prior != "graph" or args.prior_version not in ((None, 3, 4) if factors else (None, 3)):
+            p.error("regression supports graph v3, or graph v3/v4 with --reg-factors")
+        args.typed = True
+    else:
+        if factors:
+            p.error("--reg-factors applies to --task regression")
+        del args.task  # classification metadata and resume stay byte-compatible
+    if factors:
+        args.reg_factors = factors
+    else:
+        del args.reg_factors  # off: specs and meta.json stay exactly as before
+    if args.typed and getattr(args, "task", None) != "regression" and (
+            args.prior != "graph" or args.prior_version not in (None, 3)):
+        p.error("--typed applies to graph v3 (v4/rule pools carry their mask, additive is always typed)")
+    if args.audit and args.prior != "additive" and getattr(args, "task", None) != "regression":
+        p.error("--audit applies to the additive prior")
+    if not 0 <= args.lookup_probability <= 1:
+        p.error("--lookup-probability must lie in [0, 1]")
+    if args.lookup_probability == 0:
+        del args.lookup_probability  # off: specs and meta.json stay exactly as before
+    elif (getattr(args, "task", None) == "regression" or args.prior != "graph"
+          or (args.prior_version in (None, 3) and not args.typed)):
+        p.error("--lookup-probability applies to graph v4 or typed graph v3 classification")
+    if args.min_features is None:
+        del args.min_features  # off: specs and meta.json stay exactly as before
+    elif args.geometry != "cap" or not 2 <= args.min_features <= args.max_features:
+        p.error("--min-features needs --geometry cap and 2 <= min-features <= max-features")
+    # Off flags stay out of meta.json, so existing pools resume and validate unchanged.
+    for flag in ("typed", "audit"):
+        if not getattr(args, flag):
+            delattr(args, flag)
     # Scheduling only: the shards are identical for every value, so it stays out of meta.json.
     lookahead = args.lookahead
     del args.lookahead
@@ -675,7 +955,8 @@ def main():
     if args.prior_version not in SUPPORTED_VERSIONS[args.prior]:
         p.error("unsupported prior version")
     if args.p_binary is None:
-        args.p_binary = 0.78 if args.prior == "rule" or (args.prior == "graph" and args.prior_version == 4) else P_BINARY
+        args.p_binary = (0.78 if args.prior == "rule" or (args.prior == "graph" and args.prior_version == 4)
+                         else 0.55 if args.prior == "additive" else P_BINARY)
     G = PRESETS[args.preset]["group_size"]
     if (args.n_tasks <= 0 or args.n_tasks % G or args.groups_per_shard < 1 or args.n_jobs < 1
             or not 0 <= args.seed <= np.iinfo(np.uint32).max
@@ -718,10 +999,13 @@ def main():
                 groups = assemble_shard(args, shard, result.get(), fractions)
                 # Shards are written in order, so a resume still sees a contiguous prefix.
                 atomic_write(out / f"shard_{shard:06d}.pt", lambda f: torch.save(groups, f))
-                rejected = sum(int(g["rejected"].sum()) for g in groups)
-                invalid = sum(int(g["invalid"].sum()) for g in groups)
-                drafts = sum(int(g["drafts"].sum()) for g in groups)
-                checked = sum(int(g["filter_checks"].sum()) for g in groups)
+                rejected = sum(int(g["rejected"].sum()) for g in groups if "rejected" in g)
+                invalid = sum(int(g["invalid"].sum()) if "invalid" in g else
+                              sum(sum(m["structural_rejections"].values()) for m in g.get("regression_meta", []))
+                              for g in groups)
+                drafts = sum(int(g["drafts"].sum()) if "drafts" in g else
+                             sum(m["structural_drafts"] for m in g.get("regression_meta", [])) for g in groups)
+                checked = sum(int(g["filter_checks"].sum()) for g in groups if "filter_checks" in g)
                 dt, t0 = time.monotonic()-t0, time.monotonic()
                 print(f"shard {shard:06d}: {len(groups)*G/dt:.2f} tasks/s; "
                       f"filter rejected {rejected}/{checked} checks; structural rejects {invalid}/{drafts}", flush=True)

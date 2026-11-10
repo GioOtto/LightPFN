@@ -1,0 +1,38 @@
+% Wide-table fine-tuning, final classifier minus cls_long 15k on the same RTX 5090 node, four estimators.
+% Left: TabArena fold-0 relative error per task vs number of features. Middle: D3-wide log loss per dataset.
+% Right: the gate metrics at the 2.5k / 5k / 8.5k milestones (95% task bootstrap).
+% Data: plotdata2/wide_ta.dat, wide_d3wide.dat, wide_progress.dat (make_data2.py:build_wide_data).
+\begin{tikzpicture}
+\pgfplotsset{wd/.style={
+  width=5.75cm, height=4.6cm, grid=major, grid style={black!12}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}, title style={font=\scriptsize\bfseries, yshift=-4pt}}}
+\begin{axis}[wd, name=ta, xmode=log, xmin=3, xmax=2500, ymin=-15, ymax=8,
+  title={TabArena tasks (38, first split)}, xlabel={features (log scale)}, ylabel={relative error change (\%)}]
+\fill[cdata!10] (axis cs:64,-15) rectangle (axis cs:500,8);
+\draw[black!55, densely dashed] (axis cs:100,-15) -- (axis cs:100,8);
+\draw[black!40] (axis cs:3,0) -- (axis cs:2500,0);
+\addplot[only marks, mark=*, mark size=1.5pt, cdata, fill opacity=0.8] table[x=nf, y=rel_pct] {plotdata2/wide_ta.dat};
+\node[font=\tiny, text=cdata!80!black, anchor=north, align=center] at (axis cs:180,7.6) {s2w pool\\64--500};
+\node[font=\tiny, text=black!60, anchor=south east, align=right] at (axis cs:95,-14.6) {pretraining\\limit 100};
+\end{axis}
+\begin{axis}[wd, name=dw, at={(ta.east)}, anchor=west, xshift=1.7cm, xmode=log, xmin=90, xmax=2000,
+  ymin=-0.24, ymax=0.03, title={D3-wide (9 datasets, 5 folds)}, xlabel={features (log scale)}, ylabel={log loss change},
+  yticklabel style={/pgf/number format/.cd, fixed, precision=2}]
+\fill[cdata!10] (axis cs:90,-0.24) rectangle (axis cs:500,0.03);
+\draw[black!40] (axis cs:90,0) -- (axis cs:2000,0);
+\addplot[only marks, mark=diamond*, mark size=2.2pt, cdata] table[x=nf, y=d_ll] {plotdata2/wide_d3wide.dat};
+\node[font=\tiny, anchor=west] at (axis cs:520,-0.219) {madelon};
+\node[font=\tiny, anchor=west] at (axis cs:880,-0.176) {cnae-9};
+\end{axis}
+\begin{axis}[wd, name=pr, at={(dw.east)}, anchor=west, xshift=1.7cm, xmin=-0.5, xmax=9, xtick={0,2.5,5,8.5},
+  xticklabels={0,2.5k,5k,8.5k}, ymin=-7, ymax=1, title={Gate metrics during fine-tuning}, xlabel={fine-tuning step},
+  ylabel={TabArena relative error change (\%)},
+  legend style={font=\tiny, draw=black!30, at={(0.03,0.03)}, anchor=south west}]
+\draw[black!40] (axis cs:-0.5,0) -- (axis cs:9,0);
+\addplot[cdata, mark=*, mark size=1.5pt, line width=0.9pt, error bars/.cd, y dir=both, y explicit]
+  table[x=step_k, y=ta_wide, y error plus expr=\thisrow{ta_wide_hi}-\thisrow{ta_wide}, y error minus expr=\thisrow{ta_wide}-\thisrow{ta_wide_lo}] {plotdata2/wide_progress.dat};
+\addplot[ccell, mark=square*, mark size=1.4pt, line width=0.9pt, error bars/.cd, y dir=both, y explicit]
+  table[x expr=\thisrow{step_k}+0.18, y=ta_all, y error plus expr=\thisrow{ta_all_hi}-\thisrow{ta_all}, y error minus expr=\thisrow{ta_all}-\thisrow{ta_all_lo}] {plotdata2/wide_progress.dat};
+\legend{9 tasks $>$60 features, all 38 tasks}
+\end{axis}
+\end{tikzpicture}

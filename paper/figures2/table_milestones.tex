@@ -1,0 +1,31 @@
+% Classification milestone table: D1, D2, D3, Dcat 10k, Dcat 25k, Scale, and D4.
+% Source files: plotdata2/cls_milestones.dat, plotdata2/dcat_tasks.dat, runs/v15_5m_20261106/out/eval/*.json,
+% runs/dev/final*, runs/eval/external/*.csv, runs/catft/dcat/*.csv, runs/eval/large/*.csv, runs/eval/scale/*.csv.
+\begin{tabular}{llcccccccc}
+\toprule
+Model / stage & steps & D1 & D2 & D3 AUC & D3 log loss & Dcat 10k & Dcat 25k & Scale & D4 \\
+\midrule
+% runs/eval/external/{catboost,lightgbm,xgboost}.csv, runs/eval/large/{catboost,lightgbm,xgboost}.csv, runs/eval/scale/catboost.csv
+CatBoost (default) & -- & -- & -- & .9023 & .4012 & .7031 & .7118 & .9071 & .8189 \\
+LightGBM (default) & -- & -- & -- & .8907 & .5174 & .6809 & .6829 & -- & .7848 \\
+XGBoost (D3: 54 tasks) & -- & -- & -- & .8889 & .5213 & .6421 & .6597 & -- & .7903 \\
+\midrule
+% runs/dev/final_s30000/*, runs/eval/external/final_s30000_n1.csv, runs/catft/dcat/final_s30000.csv
+LightPFN 1.0 (v1 30k) & 30k & .8703 & .9373 & .9054 & .3807 & .6706 & .6733 & -- & -- \\
+% runs/dev/final/*, runs/eval/external/final_n1.csv, runs/eval/large/final_full.csv
+LightPFN 1.0 (\texttt{final}) & 120k & .8781 & .9331 & .9104 & .3586 & .6895 & .6935 & .9025 & .8063 \\
+% runs/dev/final_long_s39250/*, runs/eval/external/final_long_s39250_n1.csv, runs/catft/dcat/plain.csv, runs/eval/large/final_long_s39250_full.csv
+LightPFN 1.1.0 (\texttt{final\_long}) & 159.25k & .8783 & .9391 & .9109 & .3550 & .7047 & .7098 & .9097 & .8188 \\
+\midrule
+% runs/v15_5m_20261106/out/eval/v15_5m_20261106_cls_main_ema_s{030000,060000,090000,120000}.json
+1.5 \texttt{cls\_main} & 30k & .8713 & .9359 & .9054 & .3763 & .6703 & -- & -- & -- \\
+1.5 \texttt{cls\_main} & 60k & .8744 & .9444 & .9074 & .3677 & .6766 & -- & -- & -- \\
+1.5 \texttt{cls\_main} & 90k & .8775 & .9392 & .9098 & .3610 & .7025 & -- & -- & -- \\
+1.5 \texttt{cls\_main} & 120k & .8779 & .9485 & .9094 & .3594 & .7016 & -- & -- & -- \\
+% runs/v15_5m_20261106/out/eval/v15_5m_20261106_cls_long_ema_s{005000,010000,015000}*
+1.5 \texttt{cls\_long} (+5k) & 125k & .8772 & .9481 & .9103 & .3586 & .7078 & -- & -- & -- \\
+1.5 \texttt{cls\_long} (+10k) & 130k & .8774 & .9474 & .9104 & .3583 & .7056 & -- & -- & -- \\
+\rowcolor{orange!12}
+1.5 \texttt{cls\_long} (+15k, final) & 135k & .8777 & .9531 & .9103 & .3582 & .7075 & .7134 & .9102 & .8200 \\
+\bottomrule
+\end{tabular}

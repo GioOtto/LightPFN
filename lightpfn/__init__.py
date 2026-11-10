@@ -1,7 +1,7 @@
 """LightPFN: compact tabular inference, pretrained only on synthetic data."""
 
-__version__ = "1.1.0"
-__all__ = ["Config", "LightPFN", "LightPFNClassifier", "load_model", "load_pretrained", "save_model", "__version__"]
+__version__ = "1.5.0"
+__all__ = ["Config", "LightPFN", "LightPFNClassifier", "LightPFNRegressor", "load_model", "load_pretrained", "save_model", "__version__"]
 
 
 def __getattr__(name):
@@ -16,6 +16,9 @@ def __getattr__(name):
                 raise
             raise ImportError("LightPFNClassifier requires scikit-learn: `pip install scikit-learn`.") from exc
         value = LightPFNClassifier
+    elif name == "LightPFNRegressor":
+        from lightpfn.regressor import LightPFNRegressor
+        value = LightPFNRegressor
     elif name in ("load_model", "load_pretrained", "save_model"):
         from lightpfn import checkpoint
         value = getattr(checkpoint, name)

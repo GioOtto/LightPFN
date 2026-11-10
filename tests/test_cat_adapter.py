@@ -166,7 +166,7 @@ def test_sklearn_wrapper_permutes_the_mask_with_the_features():
     clf = LightPFNClassifier(model=adapted, device="cpu", n_estimators=3, batch_cells=10**6).fit(X, y, cat)
     one = [LightPFNClassifier(model=adapted, device="cpu", n_estimators=3, batch_cells=0).fit(X, y, cat)]
     np.testing.assert_allclose(clf.predict_proba(X), one[0].predict_proba(X), atol=1e-5)
-    plain = LightPFNClassifier(model=adapted, device="cpu", n_estimators=3).fit(X, y)
+    plain = LightPFNClassifier(model=adapted, device="cpu", n_estimators=3).fit(X, y, cat=None)
     assert np.abs(plain.predict_proba(X) - clf.predict_proba(X)).max() > 1e-4
     # a mask without categorical columns is the plain model
     none = LightPFNClassifier(model=adapted, device="cpu", n_estimators=3).fit(X, y, np.zeros(5, bool))

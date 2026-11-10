@@ -26,7 +26,9 @@ import torch.nn.functional as F
 from torch import nn
 
 from lightpfn.model.catstats import N_COUNT, context_stats, query_stats
-from lightpfn.model.layers import Block, OrthogonalEmbedding, SoftmaxScaling, fold_norm, interleave_rotary, rope
+from lightpfn.model.layers import (Block, OrthogonalEmbedding, SoftmaxScaling, checkpoint_training,
+                                 fold_norm, interleave_rotary, rope)
+from lightpfn.model.regression import RegressionModules, normalize_targets
 
 
 @dataclass
@@ -77,8 +79,14 @@ class Config:
     # only acts on columns marked categorical; encode() without a cat mask is the plain model.
     cat_adapter: bool = False
     cat_smooth: float = 1.0  # prior strength of the target statistics, in rows
+    # "quantiles": adds the regression head of lightpfn/model/regression.py (+~170k parameters at the default
+    # widths); classification stays available, with initial tensors equal to the model without it.
+    head: str = "classification"
+    grad_checkpoint: bool = False  # training activation recomputation; no weight/state layout change
 
     def __post_init__(self):
+        if self.head not in ("classification", "quantiles"):
+            raise ValueError("head must be classification or quantiles")
         if self.cell_embed not in ("fourier", "rbf"):
             raise ValueError("cell_embed must be fourier or rbf")
         if self.cat_adapter and self.cell_embed != "fourier":
@@ -209,6 +217,9 @@ class CellEmbedder(nn.Module):
         """Cell embeddings (B, n, m, E) from grouped features; cells are independent, so any slice
         of rows or columns of the features gives the same slice of the embeddings. catg (B, 1, m, G)
         (cat_adapter): categorical group members, embedded with the categorical Fourier weights."""
+        return checkpoint_training(self, self._embed, z, r, nan, catg)
+
+    def _embed(self, z, r, nan, catg=None):
         if self.cell_embed == "fourier":
             freq = self.freq if catg is None else torch.where(catg[..., None], self.cat_freq, self.freq)
             ang = z[..., None] * freq  # (B, n, m, G, F), fp32
@@ -243,6 +254,9 @@ class CatStatsEmbed(nn.Module):
 
     def forward(self, feats, labels):
         """feats (B, n, m, C + N_COUNT), labels (B, C, E) label embeddings of the classes."""
+        return checkpoint_training(self, self._forward, feats, labels)
+
+    def _forward(self, feats, labels):
         C = labels.shape[1]
         ts = torch.einsum("bnmc,bce->bnme", feats[..., :C].to(labels.dtype), labels)
         return self.ts(ts) + self.cnt(feats[..., C:].to(self.cnt.weight.dtype))
@@ -260,9 +274,11 @@ class ColumnStage(nn.Module):
         self.ind_blocks = nn.ModuleList(Block(E, cfg.col_heads, cfg.ff_factor) for _ in range(cfg.col_blocks))
         self.cell_blocks = nn.ModuleList(Block(E, cfg.col_heads, cfg.ff_factor) for _ in range(cfg.col_blocks))
 
-    def context(self, cells, y_slots):
+    def context(self, cells, y_slots, label=None):
+        """label (B, n, E): the label embedding of the rows in place of y_emb(y_slots) (regression)."""
         B, n, m, E = cells.shape
-        x = (cells + self.y_emb(y_slots)[:, :, None]).transpose(1, 2).reshape(B * m, n, E)
+        label = self.y_emb(y_slots) if label is None else label.to(cells.dtype)
+        x = (cells + label[:, :, None]).transpose(1, 2).reshape(B * m, n, E)
         col_kv = []
         for ind, ib, cb in zip(self.inducing, self.ind_blocks, self.cell_blocks):
             h = ib(ind.expand(B * m, -1, -1), *ib.keys_values(x))
@@ -292,8 +308,7 @@ class RowStage(nn.Module):
 
     def _rope(self, t):
         C = self.n_cls
-        pos = torch.arange(t.shape[2] - C, device=t.device)
-        return torch.cat([t[:, :, :C], rope(t[:, :, C:], pos, self.rope_base, self.rope_interleaved)], dim=2)
+        return torch.cat([t[:, :, :C], rope(t[:, :, C:], None, self.rope_base, self.rope_interleaved)], dim=2)
 
     def forward(self, cells, d=None, has_padding=None, return_cells=False):
         B, n, m, E = cells.shape
@@ -346,14 +361,13 @@ class RowRefinement(nn.Module):
         if d is not None and (bool((d < m).any()) if has_padding is None else has_padding):
             valid = torch.arange(m, device=cells.device)[None] < d.to(cells.device)[:, None]
             mask = valid.repeat_interleave(n, 0)[:, None, None, :]
-        pos = torch.arange(m, device=cells.device)
         for i, broadcast in enumerate(self.broadcast):
             x = broadcast(x, *broadcast.keys_values(s),
-                          q_rope=lambda q: rope(q, pos, self.rope_base, self.rope_interleaved))
+                          q_rope=lambda q: rope(q, None, self.rope_base, self.rope_interleaved))
             if i < len(self.gather):
                 gather = self.gather[i]
                 k, v = gather.keys_values(x)
-                s = gather(s, rope(k, pos, self.rope_base, self.rope_interleaved), v, mask)
+                s = gather(s, rope(k, None, self.rope_base, self.rope_interleaved), v, mask)
         return x.reshape(B, n, m, E)
 
 
@@ -371,10 +385,11 @@ class ICLStage(nn.Module):
             for i in range(depth))
         self.norm = nn.RMSNorm(D)
 
-    def context(self, r, y_slots):
+    def context(self, r, y_slots, label=None):
         B = r.shape[0]
         T = self.thinking.shape[0]
-        x = torch.cat([self.thinking.to(r.dtype).expand(B, -1, -1), r + self.y_emb(y_slots)], dim=1)
+        label = self.y_emb(y_slots) if label is None else label.to(r.dtype)
+        x = torch.cat([self.thinking.to(r.dtype).expand(B, -1, -1), r + label], dim=1)
         icl_kv = []
         for blk in self.blocks:
             k, v = blk.keys_values(x)
@@ -405,10 +420,17 @@ class RetrievalDecoder(nn.Module):
         self.scaling = SoftmaxScaling(H, self.head_dim)
 
     def keys(self, h_train):
+        if not self.training and h_train.device.type == "cuda" and torch.is_autocast_enabled("cuda"):
+            with torch.autocast("cuda", enabled=False):
+                return self.keys(h_train.float())
         B, N, _ = h_train.shape
         return self.k(h_train).view(B, N, self.n_heads, self.head_dim).transpose(1, 2)
 
     def forward(self, k, y, h_test, n_classes):
+        # Inference AMP keeps retrieval projections, scaling, SDPA and log in fp32.
+        if not self.training and h_test.device.type == "cuda" and torch.is_autocast_enabled("cuda"):
+            with torch.autocast("cuda", enabled=False):
+                return self.forward(k.float(), y, h_test.float(), n_classes)
         B, M, _ = h_test.shape
         q = self.q(h_test).view(B, M, self.n_heads, self.head_dim).transpose(1, 2)
         q = self.scaling(q, k.shape[2])
@@ -416,6 +438,22 @@ class RetrievalDecoder(nn.Module):
         v = F.one_hot(y, self.head_dim).to(q.dtype)[:, None].expand(-1, self.n_heads, -1, -1)
         p = F.scaled_dot_product_attention(q, k.to(q.dtype), v).float().mean(1)[..., :n_classes]
         return torch.log(p.clamp(min=1e-5) + 3e-5)
+
+    def moments(self, k, z, h_test):
+        """Attention-weighted mean and standard deviation of the context targets z (B, N), averaged over
+        heads: (B, M, 1) each. One SDPA call with values [z, z^2] (as the one-hot labels of forward), in
+        float32: the second moment minus the squared mean would lose the spread in bf16. Fusion depends
+        on backend support for float32; the math fallback can materialize query-by-context scores."""
+        B, M, _ = h_test.shape
+        q = self.q(h_test).view(B, M, self.n_heads, self.head_dim).transpose(1, 2)
+        q = self.scaling(q, k.shape[2])
+        z = z.float()
+        v = torch.stack([z, z * z], -1)
+        v = F.pad(v, (0, self.head_dim - 2))[:, None].expand(-1, self.n_heads, -1, -1)
+        with torch.autocast(h_test.device.type, enabled=False):
+            out = F.scaled_dot_product_attention(q.float(), k.float(), v).mean(1)
+        mean = out[..., :1]
+        return mean, (out[..., 1:2] - mean.square()).clamp_min(1e-6).sqrt()
 
 
 class LightPFN(nn.Module):
@@ -435,6 +473,17 @@ class LightPFN(nn.Module):
             self.ccmm_head = nn.Sequential(nn.LayerNorm(cfg.col_dim), nn.Linear(cfg.col_dim, 32))
         if cfg.cat_adapter:
             self.cat_stats = CatStatsEmbed(cfg)
+        self.reg = None
+        if cfg.head == "quantiles":
+            # Its own random stream (seeded by one draw inside fork_rng; the global CPU stream is restored):
+            # every other initial tensor equals the classification model's at the same seed.
+            with torch.random.fork_rng(devices=[]):
+                # manual_seed() would also reset CUDA generators, which this CPU-only fork does not save.
+                torch.random.default_generator.manual_seed(int(torch.randint(0, 2**62, (1,)).item()))
+                self.reg = RegressionModules(cfg)
+        for module in self.modules():
+            if isinstance(module, (Block, CellEmbedder, CatStatsEmbed)):
+                module.grad_checkpoint = cfg.grad_checkpoint
 
     def adapter_parameters(self):
         """The parameters of the categorical adapter (empty without it)."""
@@ -450,9 +499,10 @@ class LightPFN(nn.Module):
         for p in self.cat_stats.parameters():
             p.zero_()
 
-    def _cat_inputs(self, X_train, y_train, d, slots, n_classes, cat, generator=None, perm=None):
+    def _cat_inputs(self, X_train, y_train, d, slots, n_classes, cat, generator=None, perm=None, z=None):
         """Grouped categorical mask, context statistics, their table and the class label embeddings, or
-        None when the adapter is off or no column is categorical."""
+        None when the adapter is off or no column is categorical. z (B, n): regression, normalized targets
+        (statistics of the mean target, read through the weight of the regression label embedding)."""
         if cat is None or not self.cfg.cat_adapter:
             return None
         cat = cat.to(X_train.device).bool()
@@ -460,6 +510,10 @@ class LightPFN(nn.Module):
             cat = cat & (torch.arange(cat.shape[1], device=cat.device)[None] < d.to(cat.device)[:, None])
         if not bool(cat.any()):
             return None
+        if z is not None:
+            feats, table = context_stats(X_train, z[..., None], cat, 1, self.cfg.cat_smooth, perm, generator)
+            labels = self.reg.col_label.weight.T[None].expand(X_train.shape[0], -1, -1)  # (B, 1, E)
+            return dict(catg=self.cells.group_mask(cat, d), feats=feats, table=table, labels=labels)
         feats, table = context_stats(X_train, y_train, cat, n_classes, self.cfg.cat_smooth, perm, generator)
         labels = self.col.y_emb.weight[slots[:, :n_classes]]  # (B, C, E): class -> its label embedding
         return dict(catg=self.cells.group_mask(cat, d), feats=feats, table=table, labels=labels)
@@ -478,16 +532,19 @@ class LightPFN(nn.Module):
             blk.norm_q = fold_norm(blk.norm_q, blk.attn.q)
             blk.norm_kv = fold_norm(blk.norm_kv, blk.attn.kv)
             blk.norm_ff = fold_norm(blk.norm_ff, blk.mlp.fc1)
-        m.icl.norm = fold_norm(m.icl.norm, m.decoder.q, m.decoder.k)  # its output only feeds the decoder
+        if m.reg is None:  # its output only feeds the decoder (the regression head also reads it)
+            m.icl.norm = fold_norm(m.icl.norm, m.decoder.q, m.decoder.k)
         rotary = [m.row] + ([m.refine] if self.cfg.row_refine else [])
         for stage in rotary:
             for blk in (b for b in stage.modules() if isinstance(b, Block)):
                 interleave_rotary(blk)
             stage.rope_interleaved = True
+        for scaling in (s for s in m.modules() if isinstance(s, SoftmaxScaling)):
+            scaling._clear_base_cache()
         return m
 
     def encode(self, X_train, y_train, d=None, slots=None, n_classes=None, has_padding=None, chunk_cells=None,
-               cat=None, cat_perm=None):
+               cat=None, cat_perm=None, regression=False):
         """X_train: (B, n, m) float with NaN, y_train: (B, n) labels 0..C-1, d: (B,) true feature
         counts when features are zero-padded, slots: (B, label_slots) class -> label slot map.
         n_classes: total number of classes C. The default, max(y_train) + 1, is wrong when the
@@ -496,7 +553,11 @@ class LightPFN(nn.Module):
         that many cells at a time, which keeps them in the CPU cache; the result is the same.
         cat: (B, m) bool categorical columns, used by the categorical adapter (ignored without it).
         cat_perm: (B, n) the row order of its ordered statistics; default: random from the global RNG in
-        training mode, otherwise one fixed order, so inference is deterministic."""
+        training mode, otherwise one fixed order, so inference is deterministic.
+        regression (Config.head="quantiles"): y_train (B, n) finite float targets; the Context then holds the
+        normalized targets as y and their mean and scale in extra; predict with predict_quantiles."""
+        if regression:
+            return self._encode_regression(X_train, y_train, d, has_padding, chunk_cells, cat, cat_perm)
         B = X_train.shape[0]
         n_classes = int(y_train.max()) + 1 if n_classes is None else n_classes
         if n_classes > self.cfg.label_slots:
@@ -528,7 +589,38 @@ class LightPFN(nn.Module):
         return Context(stats, col_kv, icl_kv, self.decoder.keys(h), y_train, slots, d, n_classes,
                        extra=extra, col_refine_kv=col_refine_kv)
 
-    def _train_rows_chunked(self, X, stats, y_slots, d, has_padding, chunk_cells, ci=None):
+    def _encode_regression(self, X_train, y_train, d, has_padding, chunk_cells, cat, cat_perm):
+        if self.reg is None:
+            raise ValueError("regression needs a model with Config head='quantiles'")
+        z, mean, scale = normalize_targets(y_train)
+        zc = z[..., None]
+        labels = (self.reg.col_label(zc), None if self.reg.refine_label is None else self.reg.refine_label(zc))
+        stats = self.cells.stats(X_train)
+        gen = None if self.training else torch.Generator().manual_seed(0)
+        ci = self._cat_inputs(X_train, None, d, None, 1, cat, gen, cat_perm, z=z)
+        if chunk_cells is not None:
+            if torch.is_grad_enabled():
+                raise RuntimeError("chunk_cells is for inference: it writes into a shared buffer that autograd cannot track")
+            rows, col_kv, col_refine_kv = self._train_rows_chunked(X_train, stats, None, d, has_padding, chunk_cells,
+                                                                   ci, labels)
+        else:
+            cells = self.cells(X_train, stats, d, catg=None if ci is None else ci["catg"])
+            if ci is not None:
+                cells = cells + self.cat_stats(ci["feats"], ci["labels"]).to(cells.dtype)
+            col, col_kv = self.col.context(cells, None, labels[0])
+            col_refine_kv = None
+            if self.cfg.row_refine:
+                col = self.refine(col, d, has_padding)
+                col, col_refine_kv = self.col_refine.context(col, None, labels[1])
+            rows = self.row(col, d, has_padding)
+        h, icl_kv = self.icl.context(rows + self.reg.task.to(rows.dtype), None, self.reg.icl_label(zc))
+        extra = dict(has_padding=has_padding, regression=True, mean=mean, scale=scale)
+        if ci is not None:
+            extra.update(catg=ci["catg"], cat_table=ci["table"], cat_labels=ci["labels"])
+        return Context(stats, col_kv, icl_kv, self.decoder.keys(h), z, None, d, 0, extra=extra,
+                       col_refine_kv=col_refine_kv)
+
+    def _train_rows_chunked(self, X, stats, y_slots, d, has_padding, chunk_cells, ci=None, labels=(None, None)):
         """The cell stages of encode by pieces: column stages on groups of whole columns, row stages
         on groups of whole rows, all writing into one (B, n, m, E) buffer."""
         B, n, m = X.shape
@@ -536,11 +628,11 @@ class LightPFN(nn.Module):
         cols, rows = max(1, chunk_cells // (B * n)), max(1, chunk_cells // (B * m))
         buf = None  # (B, n, m, E), allocated with the dtype of the first column-stage output
 
-        def column_stage(stage, cells_of):
+        def column_stage(stage, cells_of, label):
             nonlocal buf
             parts = []
             for j in range(0, m, cols):
-                out, kv = stage.context(cells_of(j, j + cols), y_slots)
+                out, kv = stage.context(cells_of(j, j + cols), y_slots, label)
                 if buf is None:
                     buf = out.new_empty(B, n, m, out.shape[-1])
                 buf[:, :, j : j + cols] = out
@@ -555,12 +647,12 @@ class LightPFN(nn.Module):
             cells = self.cells.embed(*(t[:, :, a:b] for t in grouped), catg=ci["catg"][:, :, a:b])
             return cells + self.cat_stats(ci["feats"][:, :, a:b], ci["labels"]).to(cells.dtype)
 
-        col_kv = column_stage(self.col, cells_of)
+        col_kv = column_stage(self.col, cells_of, labels[0])
         col_refine_kv = None
         if self.cfg.row_refine:
             for i in range(0, n, rows):
                 buf[:, i : i + rows] = self.refine(buf[:, i : i + rows], d, has_padding)
-            col_refine_kv = column_stage(self.col_refine, lambda a, b: buf[:, :, a:b])
+            col_refine_kv = column_stage(self.col_refine, lambda a, b: buf[:, :, a:b], labels[1])
         out = torch.cat([self.row(buf[:, i : i + rows], d, has_padding) for i in range(0, n, rows)], 1)
         return out, col_kv, col_refine_kv
 
@@ -576,16 +668,34 @@ class LightPFN(nn.Module):
             col = self.col_refine.query(col, ctx.col_refine_kv)
         return self.row(col, ctx.d, ctx.extra.get("has_padding"))
 
+    def _query_rows(self, ctx, X_test, chunk_cells=None):
+        if chunk_cells is None:
+            return self._test_rows(ctx, X_test)
+        step = max(1, chunk_cells // (X_test.shape[0] * X_test.shape[2]))
+        return torch.cat([self._test_rows(ctx, X_test[:, i : i + step]) for i in range(0, X_test.shape[1], step)], 1)
+
     def predict_logits(self, ctx, X_test, chunk_cells=None):
         """Logits (B, M, n_classes) for test rows; rows are independent, so X_test can be chunked.
         chunk_cells: run the cell stages on groups of about that many cells (same result)."""
-        if chunk_cells is None:
-            rows = self._test_rows(ctx, X_test)
-        else:
-            step = max(1, chunk_cells // (X_test.shape[0] * X_test.shape[2]))
-            rows = torch.cat([self._test_rows(ctx, X_test[:, i : i + step]) for i in range(0, X_test.shape[1], step)], 1)
-        h = self.icl.query(rows, ctx.icl_kv)
+        if ctx.extra.get("regression"):
+            raise ValueError("a regression context: use predict_quantiles")
+        h = self.icl.query(self._query_rows(ctx, X_test, chunk_cells), ctx.icl_kv)
         return self.decoder(ctx.dec_k, ctx.y, h, ctx.n_classes)
+
+    def predict_quantiles(self, ctx, X_test, chunk_cells=None, normalized=False):
+        """Quantiles (B, M, 999) at levels 0.001..0.999 for the test rows of a regression context: float32 in
+        the units of the normalized targets with normalized=True, else float64 in the original units."""
+        if not ctx.extra.get("regression"):
+            raise ValueError("a classification context: use predict_logits")
+        rows = self._query_rows(ctx, X_test, chunk_cells)
+        h = self.icl.query(rows + self.reg.task.to(rows.dtype), ctx.icl_kv)
+        # decoder query, moments and quantile head in float32 even under fp16 autocast (small, range-sensitive)
+        with torch.autocast(h.device.type, enabled=False):
+            h = h.float()
+            q = self.reg.head(h, *self.decoder.moments(ctx.dec_k, ctx.y, h))
+        if normalized:
+            return q
+        return ctx.extra["mean"][:, None, None] + ctx.extra["scale"][:, None, None] * q.double()
 
     def forward(self, X, y_train, d=None, slots=None, n_classes=None, has_padding=None, cat=None):
         n_train = y_train.shape[1]

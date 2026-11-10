@@ -1,0 +1,43 @@
+% Local TabArena-Lite comparison: Elo vs median training time per 1,000 rows (log scale), every entry of the
+% author-run comparison; staircase = Pareto front over non-imputed entries. LightPFN 1.5 timings come from the
+% author's GPU, the other entries from the hosted results on other hardware. Data: plotdata2/pareto_{cls,reg}*.dat
+% (make_data2.py:build_lite_table, from runs/cls_wide_20261109/lite_box/lite_B and runs/release_v2/lite_final_20261109).
+\pgfplotsset{discard if not/.style 2 args={x filter/.append code={%
+  \edef\tempa{\thisrow{#1}}\edef\tempb{#2}\ifx\tempa\tempb\else\def\pgfmathresult{inf}\fi}}}
+\begin{tikzpicture}
+\tikzset{lbl/.style={font=\tiny, inner sep=1pt}}
+\pgfplotsset{parplot/.style={width=8.6cm, height=6.0cm, clip=false, restrict y to domain=1000:3000, xmin=0.03, xmax=20000, ymin=1000,
+  grid=major, grid style={black!10}, tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  title style={font=\scriptsize\bfseries, yshift=-4pt}, xlabel={median training time per 1k rows (s, log scale)}}}
+\begin{axis}[xmode=log, parplot, name=c, ymax=2100, ylabel={Elo (local Lite comparison)}, title={Classification (38 tasks, 115 entries)}]
+\addplot[const plot mark left, black!45, line width=0.7pt] table[x=train, y=elo] {plotdata2/pareto_cls_front.dat};
+\addplot[only marks, mark=*, mark size=1.1pt, black!35, discard if not={family}{other}] table[x=train, y=elo] {plotdata2/pareto_cls.dat};
+\addplot[only marks, mark=o, mark size=1.1pt, black!35, discard if not={family}{imputed}] table[x=train, y=elo] {plotdata2/pareto_cls.dat};
+\addplot[only marks, mark=square*, mark size=1.4pt, crow, discard if not={family}{gbdt}] table[x=train, y=elo] {plotdata2/pareto_cls.dat};
+\addplot[only marks, mark=*, mark size=1.5pt, ccell, discard if not={family}{lp1}] table[x=train, y=elo] {plotdata2/pareto_cls.dat};
+\addplot[only marks, mark=star, mark size=3.4pt, line width=1pt, orange!90!black, discard if not={family}{lp2}] table[x=train, y=elo] {plotdata2/pareto_cls.dat};
+\node[lbl, anchor=south, text=orange!80!black, font=\bfseries\tiny] at (axis cs:0.29,1448) {LightPFN 1.5};
+\node[lbl, anchor=north, text=ccell] at (axis cs:0.26,1412) {1.1};
+\node[lbl, anchor=west] at (axis cs:2.79,2026) {Kumo-Tabular};
+\node[lbl, anchor=east] at (axis cs:0.58,1786) {Seldon-Mini};
+\node[lbl, anchor=west] at (axis cs:0.95,1565) {TabICLv2};
+\node[lbl, anchor=west, text=crow] at (axis cs:4.89,1341) {CatBoost};
+\node[lbl, anchor=south, text=crow] at (axis cs:1087.73,1395) {CatBoost (tuned)};
+\node[lbl, anchor=north west, text=crow] at (axis cs:2.25,1140) {LightGBM};
+\node[lbl, anchor=north west, text=crow] at (axis cs:1.88,1192) {XGBoost};
+\end{axis}
+\begin{axis}[xmode=log, parplot, name=r, at={(c.east)}, anchor=west, xshift=0.9cm, ymax=2750, title={Regression (13 tasks, 111 entries)}]
+\addplot[const plot mark left, black!45, line width=0.7pt] table[x=train, y=elo] {plotdata2/pareto_reg_front.dat};
+\addplot[only marks, mark=*, mark size=1.1pt, black!35, discard if not={family}{other}] table[x=train, y=elo] {plotdata2/pareto_reg.dat};
+\addplot[only marks, mark=o, mark size=1.1pt, black!35, discard if not={family}{imputed}] table[x=train, y=elo] {plotdata2/pareto_reg.dat};
+\addplot[only marks, mark=square*, mark size=1.4pt, crow, discard if not={family}{gbdt}] table[x=train, y=elo] {plotdata2/pareto_reg.dat};
+\addplot[only marks, mark=star, mark size=3.4pt, line width=1pt, orange!90!black, discard if not={family}{lp2}] table[x=train, y=elo] {plotdata2/pareto_reg.dat};
+\node[lbl, anchor=north, text=orange!80!black, font=\bfseries\tiny] at (axis cs:0.21,1420) {LightPFN 1.5};
+\node[lbl, anchor=west] at (axis cs:2.01,2668) {Kumo-Tabular};
+\node[lbl, anchor=east] at (axis cs:0.38,2337) {Seldon-Mini};
+\node[lbl, anchor=west] at (axis cs:0.69,1737) {TabICLv2};
+\node[lbl, anchor=west, text=crow] at (axis cs:9.02,1416) {CatBoost};
+\node[lbl, anchor=south, text=crow] at (axis cs:2267.19,1536) {CatBoost (tuned)};
+\node[lbl, anchor=north west, text=crow] at (axis cs:2.03,1217) {LightGBM};
+\end{axis}
+\end{tikzpicture}

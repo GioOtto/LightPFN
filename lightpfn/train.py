@@ -33,9 +33,87 @@ from torch.utils.data import DataLoader, IterableDataset
 from lightpfn.model.lightpfn import Config, LightPFN
 from lightpfn.model.ccmm import ccmm_task_loss
 from lightpfn.model.layers import Block
+from lightpfn.model_v2.icl import SandwichBlock
 from lightpfn.sklearn import stratified_subsample
+from lightpfn.train_stability import make_optimizers, load_optimizer_states, optimizer_names, TrainingDiagnostic
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class NanGuard:
+    """Opt-in, read-only diagnostics. No hooks, anomaly mode, or per-micro GPU reads."""
+
+    @classmethod
+    def from_env(cls, *args, **kwargs):
+        path = os.environ.get("LIGHTPFN_NAN_GUARD")
+        return cls(path, *args, **kwargs) if path else None
+
+    def __init__(self, path, model, ema, opts, args, cfg, rank, device):
+        from collections import deque
+        self.path, self.model, self.ema, self.opts = Path(path), model, ema, opts
+        self.args, self.cfg, self.rank, self.device = args, cfg, rank, torch.device(device)
+        self.trace = deque(maxlen=256)
+        self.micro_index = 0
+
+    def begin(self, step, fit_rng):
+        self.step, self.fit_rng_state = step, copy.deepcopy(fit_rng.bit_generator.state)
+        self.trace.clear()
+        self.micro_index = 0
+
+    def record(self, mb, group_index, task_offset):
+        # Loader tensors are on CPU. Never retain X/y/codes or copy a GPU tensor here.
+        self.trace.append(dict(micro_index=self.micro_index, group_index=group_index,
+                               task_offset=task_offset, shape=tuple(mb["X"].shape), n_train=mb["n_train"],
+                               d=mb["d"].clone(),
+                               row_uid_edges=mb["row_uid"][:, [0, -1]].clone() if "row_uid" in mb else None,
+                               cpu_rng=torch.get_rng_state(),
+                               cuda_rng=torch.cuda.get_rng_state(self.device) if self.device.type == "cuda" else None))
+        self.micro_index += 1
+
+    def fail(self, reason, norm32=None, norm64=None):
+        # Each bad local rank saves before exiting; after reduce only rank 0 saves.
+        if reason == "before_allreduce" or self.rank == 0:
+            try:
+                self.capture(reason, norm32, norm64)
+            except Exception as exc:
+                raise FloatingPointError(f"non-finite gradients: capture failed at {self.path}: {exc}") from exc
+        if reason == "after_allreduce" and torch.distributed.is_initialized():
+            # Peers must not exit and let torchrun kill rank 0 during its atomic save.
+            torch.distributed.barrier()
+        raise FloatingPointError(f"non-finite gradients: {reason}, rank {self.rank}, step {self.step}; {self.path}")
+
+    def capture(self, reason, norm32, norm64):
+        grads = {n: p.grad.detach().cpu().clone() for n, p in self.model.named_parameters() if p.grad is not None}
+        bad = [n for n, g in grads.items() if not bool(torch.isfinite(g).all())]
+        self.path.mkdir(parents=True, exist_ok=True)
+        target = self.path / f"failure_rank{self.rank}_step{self.step}.pt"
+        tmp = target.with_suffix(".pt.tmp")
+        torch.save(dict(step=self.step, rank=self.rank, reason=reason, nonfinite_params=bad,
+                        norm32=norm32, norm64=norm64, grads=grads, model=self.model.state_dict(),
+                        ema=self.ema.state_dict(), opts=[o.state_dict() for o in self.opts],
+                        optimizer_param_names=optimizer_names(self.opts, self.model),
+                        args=vars(self.args), config=asdict(self.cfg), micro_trace=list(self.trace),
+                        micro_count=self.micro_index, fit_rng_state=self.fit_rng_state,
+                        torch_version=str(torch.__version__), cuda=torch.version.cuda, hip=torch.version.hip,
+                        device_name=torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else "cpu"), tmp)
+        tmp.replace(target)
+
+    def check_local(self, params):
+        grads = [p.grad for p in params if p.grad is not None]
+        # Foreach infinity norms fuse reads across tensors, without modifying gradients.
+        # One scalar host read for the whole rank, not one per parameter/micro-batch.
+        if grads and not bool(torch.isfinite(torch.stack(torch._foreach_norm(grads, float("inf")))).all()):
+            self.fail("before_allreduce")
+
+    def clip(self, params, max_norm):
+        grads = [p.grad for p in params if p.grad is not None]
+        norm = torch.nn.utils.get_total_norm(grads)
+        if not bool(torch.isfinite(norm)):
+            norm64 = torch.linalg.vector_norm(torch.stack([torch.linalg.vector_norm(g.double()) for g in grads]))
+            self.fail("after_allreduce", float(norm), float(norm64))
+        # Same two operations/defaults as clip_grad_norm_, with its norm reused.
+        torch.nn.utils.clip_grads_with_norm_(params, max_norm, norm)
+        return norm
 
 
 def inject_missing(rng, X, d, n_train=None):
@@ -90,6 +168,9 @@ def _check_loaded_group(g):
     non-constant columns are guaranteed by the generator (validate_group) for new pools,
     but not required here: v1 pools have rare classes missing from small test splits.
     """
+    if "y_reg" in g:
+        from lightpfn.prior.regression import validate_regression_group
+        return validate_regression_group(g)
     X, y, d, nc = (g[k] for k in ("X", "y", "d", "n_classes"))
     if (not all(torch.is_tensor(v) for v in (X, y, d, nc)) or X.ndim != 3
             or not X.is_floating_point() or y.dtype not in (torch.uint8, torch.int16, torch.int32, torch.int64)
@@ -120,7 +201,8 @@ class PoolStream(IterableDataset):
     permutation shared by the workers of every rank, each (rank, worker) taking its own slice
     (fixed shard list). With world > 1 (data parallel) the ranks share the seed and differ in rank."""
 
-    def __init__(self, pools, p_missing=0.3, seed=0, augment="none", sampling="replace", rank=0, world=1):
+    def __init__(self, pools, p_missing=0.3, seed=0, augment="none", sampling="replace", rank=0, world=1,
+                 typed=False, cat_mask_drop=0.0):
         super().__init__()
         if (not pools or not np.isfinite(p_missing) or not 0 <= p_missing <= 1
                 or not isinstance(seed, (int, np.integer)) or not 0 <= seed <= np.iinfo(np.uint32).max
@@ -135,6 +217,14 @@ class PoolStream(IterableDataset):
         self.augmentation = augment
         self.sampling = sampling
         self.rank, self.world = rank, world
+        # typed: groups with a categorical mask also yield level IDs ("codes", -1 = missing; see typed_codes).
+        self.typed = typed
+        # cat_mask_drop (legacy view, v1 trunk): probability that a task's categorical mask is cleared, so the
+        # model also learns tables whose categorical columns arrive undeclared (the "num view" of the lookup
+        # probe, -1.7pp for V15 on 2026-11-04). 0 draws nothing: the stream is unchanged.
+        if not (np.isfinite(cat_mask_drop) and 0 <= cat_mask_drop <= 1) or (cat_mask_drop and typed):
+            raise ValueError("cat_mask_drop must be in [0, 1] and needs the legacy view")
+        self.cat_mask_drop = cat_mask_drop
 
     def __iter__(self):
         info = torch.utils.data.get_worker_info()
@@ -171,14 +261,30 @@ class PoolStream(IterableDataset):
                     groups = torch.load(path, map_location="cpu", weights_only=True)
                     if not isinstance(groups, list) or not groups:
                         raise ValueError("empty/non-list shard")
+                    if len({"y_reg" in g for g in groups}) != 1:
+                        raise ValueError("mixed classification/regression shard")
                     for g in groups:
                         _check_loaded_group(g)
                 except Exception as exc:
                     raise ValueError(f"cannot read valid shard {path}: {exc}") from exc
                 pending[k] = [groups[i] for i in rng.permutation(len(groups))]
-            yield self.augment(rng, pending[k].pop())
+            out = self.augment(rng, pending[k].pop())
+            if self.cat_mask_drop and "cat_mask" in out:
+                drop = torch.from_numpy(rng.random(out["cat_mask"].shape[0]) < self.cat_mask_drop)
+                out["cat_mask"] = out["cat_mask"] & ~drop[:, None]
+            yield out
 
     def augment(self, rng, g):
+        if "y_reg" in g:
+            # Both views use the typed augmentation: the v1 trunk reads X and cat_mask (the categorical values
+            # of the regression pools are level identities in X), v2 the level IDs too.
+            if self.augmentation != "none":
+                raise ValueError("regression requires augment=none")
+            return self.augment_typed(rng, g)
+        if self.typed and "cat_mask" in g:
+            if self.augmentation != "none":
+                raise ValueError("the typed view supports no augmentation")
+            return self.augment_typed(rng, g)
         X = g["X"].float().numpy().copy()
         d = g["d"].numpy().copy()
         cat = g["cat_mask"].numpy().copy() if "cat_mask" in g else None
@@ -205,6 +311,50 @@ class PoolStream(IterableDataset):
         if cat is not None:
             out["cat_mask"] = torch.from_numpy(cat)
         return out
+
+    def augment_typed(self, rng, g):
+        """Typed view: the same column permutation for values, mask and level IDs; missing values (NaN, ID -1)
+        injected as in the legacy view, with nominal columns ranked by a random score per level, not by ID."""
+        X = g["X"].float().numpy().copy()
+        cat = g["cat_mask"].numpy().copy()
+        codes = typed_codes(g)
+        d = g["d"].numpy()
+        for b in range(X.shape[0]):
+            db = int(d[b])
+            order = rng.permutation(db)
+            X[b, :, :db], cat[b, :db], codes[b, :, :db] = X[b][:, order], cat[b, order], codes[b][:, order]
+            if rng.random() < self.p_missing:
+                view = X[b].copy()
+                for j in np.flatnonzero(cat[b, :db]):
+                    _, inverse = np.unique(codes[b, :, j], return_inverse=True)
+                    view[:, j] = rng.random(inverse.max() + 1)[inverse]
+                inject_missing(rng, view, db, int(g["n_train"]))
+                miss = np.isnan(view)
+                X[b][miss] = np.nan
+                codes[b][miss & cat[b]] = -1
+        if "y_reg" in g:
+            return dict(X=torch.from_numpy(X), y_reg=g["y_reg"], d=torch.from_numpy(d.copy()).long(),
+                        n_train=int(g["n_train"]), row_uid=g["row_uid"],
+                        cat_mask=torch.from_numpy(cat), codes=torch.from_numpy(codes))
+        return dict(X=torch.from_numpy(X), y=g["y"].long(), d=torch.from_numpy(d.copy()).long(),
+                    n_classes=g["n_classes"].long(), n_train=int(g["n_train"]),
+                    cat_mask=torch.from_numpy(cat), codes=torch.from_numpy(codes))
+
+
+def typed_codes(g):
+    """(G, n, m) int32 level IDs of the categorical columns (0 elsewhere): the stored cat_codes, or, for pools
+    whose categorical values are exact level identities in X (graph v4, rule), the rank of each distinct value."""
+    G, n, m = g["X"].shape
+    cat = g["cat_mask"].numpy()
+    codes = np.zeros((G, n, m), dtype=np.int32)
+    for b in range(G):
+        cols = np.flatnonzero(cat[b])
+        if "cat_codes" in g:
+            codes[b][:, cols] = g["cat_codes"][b, :, :len(cols)].numpy()
+        else:
+            for j in cols:
+                codes[b, :, j] = np.unique(g["X"][b, :, j].numpy(), return_inverse=True)[1]
+    return codes
 
 
 def augment_v2(rng, X, d, n_train, cat):
@@ -266,6 +416,8 @@ def augment_v2(rng, X, d, n_train, cat):
 def fit_rows(g, n_rows, rng):
     """The group with n_rows rows per task: the same train fraction, stratified train rows and random test
     rows, drawn per task."""
+    if "y_reg" in g:
+        return fit_rows_regression(g, n_rows, rng)
     X, y = g["X"], g["y"]
     G, n, _ = X.shape
     ntr = int(g["n_train"])
@@ -275,8 +427,26 @@ def fit_rows(g, n_rows, rng):
     for t in range(G):
         tr = np.arange(ntr) if ntr_new == ntr else stratified_subsample(rng, y[t, :ntr].numpy(), ntr_new)
         rows.append(torch.from_numpy(np.concatenate([tr, ntr + np.sort(rng.choice(n - ntr, nte_new, replace=False))])))
-    return dict(g, X=torch.stack([X[t, r] for t, r in enumerate(rows)]),
-                y=torch.stack([y[t, r] for t, r in enumerate(rows)]), n_train=ntr_new)
+    out = dict(g, X=torch.stack([X[t, r] for t, r in enumerate(rows)]),
+               y=torch.stack([y[t, r] for t, r in enumerate(rows)]), n_train=ntr_new)
+    if "codes" in g:  # typed view: level IDs follow their rows
+        out["codes"] = torch.stack([g["codes"][t, r] for t, r in enumerate(rows)])
+    return out
+
+
+def fit_rows_regression(g, n_rows, rng):
+    """Subsample context and query separately, without inspecting target values."""
+    B, n, _ = g["X"].shape
+    ntr = g["n_train"]
+    nt = min(max(1, round(ntr * n_rows / n)), ntr, n_rows - 1)
+    nq = min(n_rows - nt, n - ntr)
+    selected = [torch.from_numpy(np.r_[np.sort(rng.choice(ntr, nt, replace=False)),
+                      ntr + np.sort(rng.choice(n - ntr, nq, replace=False))]) for _ in range(B)]
+    out = dict(g, n_train=nt)
+    for key in ("X", "y_reg", "codes", "row_uid"):
+        if key in g:
+            out[key] = torch.stack([g[key][i, r] for i, r in enumerate(selected)])
+    return out
 
 
 def micro_batches(g, max_cells, row_cost=0, rng=None):
@@ -297,10 +467,38 @@ def micro_batches(g, max_cells, row_cost=0, rng=None):
         mb["X"] = mb["X"][:, :, :int(mb["d"].max())]
         if "cat_mask" in mb:
             mb["cat_mask"] = mb["cat_mask"][:, :mb["X"].shape[-1]]
+        if "codes" in mb:
+            mb["codes"] = mb["codes"][:, :, :mb["X"].shape[-1]]
         yield mb
 
 
+def task_loss_regression(model, mb, device):
+    """Per-task pinball loss of the v1 trunk with the quantiles head (Config.head="quantiles"), in the units
+    of the targets normalized with the context rows (lightpfn/model/regression.py)."""
+    from lightpfn.model.regression import pinball_loss
+
+    if getattr(model, "reg", None) is None:
+        raise ValueError("regression pools need --config with head=quantiles (or --arch v2)")
+    m_max = int(mb["d"].max())
+    has_padding = bool((mb["d"] < m_max).any())
+    ntr = mb["n_train"]
+    X = mb["X"][:, :, :m_max].to(device, non_blocking=True)
+    y = mb["y_reg"].to(device, non_blocking=True)
+    d = mb["d"].to(device, non_blocking=True)
+    cat = None
+    if "cat_mask" in mb and getattr(model.cfg, "cat_adapter", False) and bool(mb["cat_mask"].any()):
+        cat = mb["cat_mask"][:, :m_max].to(device, non_blocking=True)
+    ctx = model.encode(X[:, :ntr], y[:, :ntr], d=d, has_padding=has_padding, cat=cat, regression=True)
+    q = model.predict_quantiles(ctx, X[:, ntr:], normalized=True)
+    target = (y[:, ntr:].double() - ctx.extra["mean"][:, None]) / ctx.extra["scale"][:, None]
+    return pinball_loss(q, target, reduction="task")
+
+
 def task_loss(model, mb, device, label_slots, ccmm_weight=0.0):
+    if "y_reg" in mb:
+        if ccmm_weight:
+            raise ValueError("CCMM loss does not support regression")
+        return task_loss_regression(model, mb, device)
     if ccmm_weight:
         if getattr(model.cfg, "cat_adapter", False):
             raise ValueError("CCMM loss does not support the categorical adapter")
@@ -327,10 +525,69 @@ def task_loss(model, mb, device, label_slots, ccmm_weight=0.0):
     return ce.mean(1)  # per task
 
 
+def task_loss_v2(model, mb, device, attn_zloss=0.0, stats=None):
+    """Per-task CE or normalized pinball loss on a pool micro-batch: tasks with fewer features are
+    zero-padded (Table.n_columns), as in task_loss. With the typed view (mb["codes"]) the categorical
+    columns enter as level IDs; otherwise every column is numerical. attn_zloss > 0 adds to each
+    classification task attn_zloss * mean over heads and query rows of logsumexp(retrieval attention
+    logits)^2 and puts that detached per-task term in stats["attn_zloss"]; 0 runs the plain loss."""
+    from lightpfn.model_v2 import Table
+
+    # Metadata stays on CPU (see task_loss): read it before the copies, without host syncs.
+    ntr, d = mb["n_train"], mb["d"]
+    regression = "y_reg" in mb
+    C = 2 if regression else max(int(mb["n_classes"].max()), 2)
+    m = int(d.max())
+    has_padding = bool((d < m).any())
+    X = mb["X"][:, :, :m].to(device, non_blocking=True)
+    y = mb["y_reg" if regression else "y"].to(device, non_blocking=True)
+    b, n = X.shape[:2]
+    missing = torch.isnan(X)
+    rows = torch.arange(n, device=device)[None].expand(b, -1)
+    if regression:
+        rows = mb["row_uid"].to(device, non_blocking=True)
+    cols = torch.arange(m, device=device)[None].expand(b, -1)
+    if "codes" in mb:
+        codes = mb["codes"][:, :, :m].to(device, non_blocking=True)
+        cat = mb["cat_mask"][:, :m].to(device, non_blocking=True)
+        missing = missing | (cat[:, None] & (codes < 0))
+    else:
+        codes = torch.zeros(X.shape, dtype=torch.int32, device=device)
+        cat = torch.zeros((b, m), dtype=torch.bool, device=device)
+    width = d.to(device, torch.int64, non_blocking=True) if has_padding else None
+    table = Table(X, codes, cat, missing, rows, cols, width)
+    if regression:
+        from lightpfn.model_v2.heads import pinball_loss
+        from lightpfn.model_v2.regression import normalize_targets
+        if "y" in mb:
+            raise ValueError("mixed task micro-batch")
+        # Fit float64 moments on context only, before low precision arithmetic.
+        z, mean, scale = normalize_targets(y, ntr)
+        quantiles = model(table.rows(slice(0, ntr)), y[:, :ntr], table.rows(slice(ntr, n)), regression=True)
+        normalized = (quantiles.double() - mean[:, None, None]) / scale[:, None, None]
+        return pinball_loss(normalized, z[:, ntr:], reduction="task")
+    if attn_zloss:
+        model.retrieval.zloss = True
+        try:
+            logp = model(table.rows(slice(0, ntr)), y[:, :ntr], table.rows(slice(ntr, n)), n_classes=C)
+            terms = attn_zloss * model.retrieval.zloss_terms
+        finally:
+            model.retrieval.zloss, model.retrieval.zloss_terms = False, None
+        if stats is not None:
+            stats["attn_zloss"] = terms.detach()
+    else:
+        logp = model(table.rows(slice(0, ntr)), y[:, :ntr], table.rows(slice(ntr, n)), n_classes=C)
+    diagnostic = getattr(model.retrieval, "diagnostic", None)
+    if diagnostic is not None:
+        diagnostic.targets(y[:, ntr:])
+    ce = F.nll_loss(logp.float().transpose(1, 2), y[:, ntr:], reduction="none").mean(1)
+    return ce + terms if attn_zloss else ce
+
+
 def param_groups(model):
     """Muon and AdamW parameters among the trainable ones (frozen parameters are in neither)."""
     muon, adamw = [], []
-    muon_ids = {id(p) for blk in model.modules() if isinstance(blk, Block)
+    muon_ids = {id(p) for blk in model.modules() if isinstance(blk, (Block, SandwichBlock))
                 for name, p in blk.named_parameters() if p.ndim == 2 and "scaling" not in name}
     for p in model.parameters():
         if p.requires_grad:
@@ -345,9 +602,11 @@ def init_weights(model, path):
 
     src = load_model(path, "cpu")
     missing, unexpected = model.load_state_dict(src.state_dict(), strict=False)
-    if unexpected or any(not k.startswith(("cells.cat_", "cat_stats.")) for k in missing):
+    # A classification checkpoint into a model with the quantiles head: the regression modules keep their
+    # initialization (warm start).
+    if unexpected or any(not k.startswith(("cells.cat_", "cat_stats.", "reg.")) for k in missing):
         raise ValueError(f"--init checkpoint does not match the model: missing {missing}, unexpected {unexpected}")
-    if missing:
+    if any(k.startswith(("cells.cat_", "cat_stats.")) for k in missing):
         model.init_cat_adapter()
 
 
@@ -403,8 +662,7 @@ def replicas_differ(model):
 
 @torch.no_grad()
 def ema_update(ema, model, decay):
-    for pe, pm in zip(ema.parameters(), model.parameters()):
-        pe.lerp_(pm, 1 - decay)
+    torch._foreach_lerp_(list(ema.parameters()), list(model.parameters()), 1 - decay)
 
 
 def configure_acceleration(model, compile_region="none", tunableop_results=None, compile_workers=1):
@@ -425,12 +683,17 @@ def configure_acceleration(model, compile_region="none", tunableop_results=None,
                 target.compile(dynamic=True)
 
 
-def lite_eval(model, device, out_csv):
+def lite_eval(model, device, out_csv, arch="v1", categorical=False):
     from lightpfn.eval.harness import evaluate, make_jobs
     from lightpfn.eval.report import load_results, per_task, summarize, task_groups
     from lightpfn.sklearn import LightPFNClassifier
 
-    factory = lambda n_threads, seed: LightPFNClassifier(model=model, device=device, seed=seed)  # noqa: E731
+    if arch == "v2":
+        from lightpfn.model_v2.estimator import V2Classifier
+        factory = lambda n_threads, seed: V2Classifier(model, device=device, seed=seed,  # noqa: E731
+                                                       categorical=categorical)
+    else:
+        factory = lambda n_threads, seed: LightPFNClassifier(model=model, device=device, seed=seed)  # noqa: E731
     df = evaluate(factory, make_jobs("lite"), n_threads=4, n_workers=1, verbose=False)
     df.to_csv(out_csv, index=False)
     base = load_results("lite", ["rf", "lightgbm", "xgboost", "catboost", "tabicl_gpu"])
@@ -467,12 +730,29 @@ def main():
     p.add_argument("--warmup", type=int, default=2000)
     p.add_argument("--ema", type=float, default=0.999)
     p.add_argument("--clip", type=float, default=1.0)
+    p.add_argument("--decoder-scaling-lr-factor", type=float, default=None,
+                   help="opt-in decoder SoftmaxScaling AdamW group: LR multiplier (0,1), no decay; "
+                        "1 preserves legacy groups; on resume omitted = saved setting or 1")
+    p.add_argument("--decoder-attn-zloss", type=float, default=None,
+                   help="v2 classification only: opt-in z-loss coefficient on the retrieval decoder's "
+                        "attention logits, coef * mean logsumexp^2; 0 = plain loss; on resume omitted = "
+                        "saved setting or 0")
+    p.add_argument("--diagnostics-every", type=int, default=0,
+                   help="v2 only: detached per-module gradients, scaling norms and attention maxima; "
+                        "0 disables; otherwise a multiple of --log-every")
     p.add_argument("--p-missing", type=float, default=0.3)
     p.add_argument("--augment", choices=["none", "v2"], default="none")
+    p.add_argument("--cat-mask-drop", type=float, default=None,
+                   help="v1 legacy view: probability of clearing a task's categorical mask; "
+                        "on resume omitted = saved setting, otherwise 0")
+    p.add_argument("--view", choices=["legacy", "typed"], default=None,
+                   help="typed: categorical columns of pools with a mask enter as level IDs (default for --arch v2; "
+                        "legacy: every column as a number, the v1 view)")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--log-every", type=int, default=50)
     p.add_argument("--eval-every", type=int, default=2000)
     p.add_argument("--save-every", type=int, default=1000)
+    p.add_argument("--arch", choices=["v1", "v2"], default="v1", help="v2: experimental C2v2 (lightpfn.model_v2)")
     p.add_argument("--config", type=str, default="{}", help="JSON overrides of model Config")
     p.add_argument("--ccmm-weight", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=0)
@@ -482,6 +762,16 @@ def main():
                    help="adapter: train only the categorical adapter, every other weight frozen")
     p.add_argument("--no-lite", action="store_true", help="skip the lite TabArena eval (EMA checkpoints are still saved)")
     args = p.parse_args()
+    if (args.diagnostics_every < 0 or (args.diagnostics_every and
+            (args.arch != "v2" or args.diagnostics_every % args.log_every))):
+        p.error("--diagnostics-every requires v2 and a positive multiple of --log-every")
+    if args.view is None:
+        args.view = "typed" if args.arch == "v2" else "legacy"
+    if args.view == "typed" and args.arch != "v2":
+        p.error("--view typed needs --arch v2")
+    if args.cat_mask_drop is not None and (not math.isfinite(args.cat_mask_drop)
+            or not 0 <= args.cat_mask_drop <= 1 or (args.cat_mask_drop and args.arch != "v1")):
+        p.error("--cat-mask-drop needs --arch v1 and a probability in [0, 1]")
     if args.stop_at is not None and not 0 < args.stop_at <= args.steps:
         p.error("--stop-at must be in 1..--steps")
     end = args.steps if args.stop_at is None else args.stop_at
@@ -503,33 +793,62 @@ def main():
     device = "cuda"
     run_dir = args.output_dir or ROOT / "runs" / "train" / args.run
     run_dir.mkdir(parents=True, exist_ok=True)
-    cfg = Config(**json.loads(args.config))
+    ckpt_path = run_dir / "ckpt.pt"
+    ck = torch.load(ckpt_path, map_location=device, weights_only=False) if ckpt_path.exists() else None
+    if args.cat_mask_drop is None:
+        # args.json also covers checkpoints made before the setting was stored in ckpt.pt.
+        saved_args = json.loads((run_dir / "args.json").read_text()) if ck and (run_dir / "args.json").exists() else {}
+        args.cat_mask_drop = (ck or {}).get("cat_mask_drop", saved_args.get("cat_mask_drop", 0.0))
+    if (not math.isfinite(args.cat_mask_drop) or not 0 <= args.cat_mask_drop <= 1
+            or (args.cat_mask_drop and args.arch != "v1")):
+        p.error("--cat-mask-drop needs --arch v1 and a probability in [0, 1]")
     if not math.isfinite(args.ccmm_weight) or args.ccmm_weight < 0:
         p.error("--ccmm-weight must be finite and nonnegative")
-    if args.ccmm_weight and not cfg.ccmm:
-        p.error("--ccmm-weight requires --config containing ccmm=true")
-    if args.ccmm_weight and cfg.cat_adapter:
-        p.error("CCMM loss does not support the categorical adapter")
-    model = LightPFN(cfg)
+    if args.decoder_attn_zloss is None:
+        args.decoder_attn_zloss = float((ck or {}).get("decoder_attn_zloss", 0.0))
+    if not math.isfinite(args.decoder_attn_zloss) or args.decoder_attn_zloss < 0:
+        p.error("--decoder-attn-zloss must be finite and nonnegative")
+    if args.decoder_attn_zloss and args.arch != "v2":
+        p.error("--decoder-attn-zloss needs --arch v2")
+    if args.arch == "v2":
+        from lightpfn.model_v2 import Config as ConfigV2, LightPFNV2
+        if args.ccmm_weight or args.trainable != "all" or args.init is not None or args.compile != "none":
+            p.error("--arch v2 supports neither CCMM, adapters, --init nor --compile")
+        overrides = json.loads(args.config)
+        if ck is not None:
+            for key in ("decoder_scale_cap", "icl_scale_cap", "retrieval_smoothing"):
+                overrides.setdefault(key, ck["config"].get(key, 0.0))
+            overrides.setdefault("decoder_scale_mode", ck["config"].get("decoder_scale_mode", "legacy"))
+            for key, default in (("icl_scale_mode", "legacy"), ("icl_log_reference", 1024),
+                                 ("frontend_qk_norm", False), ("decoder_head_bound", 8.0),
+                                 ("retrieval_qk_affine", True)):
+                overrides.setdefault(key, ck["config"].get(key, default))
+        cfg = ConfigV2(**overrides)
+        model = LightPFNV2(cfg)
+    else:
+        overrides = json.loads(args.config)
+        if ck is not None:
+            overrides.setdefault("grad_checkpoint", ck["config"].get("grad_checkpoint", False))
+        cfg = Config(**overrides)
+        if args.ccmm_weight and not cfg.ccmm:
+            p.error("--ccmm-weight requires --config containing ccmm=true")
+        if args.ccmm_weight and cfg.cat_adapter:
+            p.error("CCMM loss does not support the categorical adapter")
+        model = LightPFN(cfg)
     if args.init is not None and not (run_dir / "ckpt.pt").exists():
         init_weights(model, args.init)
     freeze_for(model, args.trainable)
     model = model.to(device)
     ema = copy.deepcopy(model).eval()
     muon_p, adamw_p = param_groups(model)
-    opts = []
-    if muon_p:
-        opts.append(torch.optim.Muon(muon_p, lr=args.lr, weight_decay=args.weight_decay, adjust_lr_fn="match_rms_adamw"))
-    if adamw_p:
-        opts.append(torch.optim.AdamW(adamw_p, lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.98)))
     step = 0
-    ckpt_path = run_dir / "ckpt.pt"
+    if args.decoder_scaling_lr_factor is None:
+        args.decoder_scaling_lr_factor = (ck or {}).get("decoder_scaling_lr_factor", 1.0)
+    opts = make_optimizers(model, muon_p, adamw_p, args.lr, args.weight_decay, args.decoder_scaling_lr_factor)
     if ckpt_path.exists():
-        ck = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ck["model"])
         ema.load_state_dict(ck["ema"])
-        for o, s in zip(opts, ck["opts"]):
-            o.load_state_dict(s)
+        load_optimizer_states(opts, ck, model, (muon_p, adamw_p))
         step = ck["step"]
         if main_rank:
             print(f"resumed from step {step}", flush=True)
@@ -556,7 +875,8 @@ def main():
     # does not replay the groups it saw from step 0
     stream_seed = (args.seed + 1_000_003 * step) % 2**32
     fit_rng = np.random.default_rng([stream_seed, rank, 17])
-    loader = DataLoader(PoolStream(pools, args.p_missing, stream_seed, args.augment, args.sampling, rank, world),
+    loader = DataLoader(PoolStream(pools, args.p_missing, stream_seed, args.augment, args.sampling, rank, world,
+                                   typed=args.view == "typed", cat_mask_drop=args.cat_mask_drop),
                         batch_size=None, num_workers=args.workers,
                         pin_memory=True, prefetch_factor=4 if args.workers else None,
                         persistent_workers=bool(args.workers))
@@ -571,34 +891,68 @@ def main():
     log = open(run_dir / "log.csv", "a") if main_rank else None
     t0, tasks_seen, n_acc = time.time(), 0, 0
     loss_acc = torch.zeros((), device=device, dtype=torch.float64)
+    zloss_acc = torch.zeros((), device=device, dtype=torch.float64)
     params = [p for p in model.parameters() if p.requires_grad]
+    diagnostic = TrainingDiagnostic(model) if args.diagnostics_every else None
+    diagnostic_norms = []
+    nan_guard = NanGuard.from_env(model, ema, opts, args, cfg, rank, device)
     model.train()
     while step < end:
+        if nan_guard is not None:
+            nan_guard.begin(step + 1, fit_rng)
+        sample_diagnostic = diagnostic is not None and (step + 1) % args.diagnostics_every == 0
+        if sample_diagnostic:
+            diagnostic.begin()
         lr = lr_at(step)
         for o in opts:
             for gr in o.param_groups:
-                gr["lr"] = lr
+                gr["lr"] = lr * gr["lr_scale"] if "lr_scale" in gr else lr
         groups = [next(it) for _ in range(args.groups_per_step)]
         n_local = n_tasks = sum(g["X"].shape[0] for g in groups)
         if world > 1:  # the mean over every rank's tasks; a GPU tensor, so no host sync
             n_tasks = torch.tensor(float(n_local), device=device)
             dist.all_reduce(n_tasks)
         step_loss = torch.zeros((), device=device, dtype=torch.float64)
-        for g in groups:
+        micro_batch_count = 0
+        zloss_stats = {} if args.decoder_attn_zloss else None
+        for group_index, g in enumerate(groups):
+            task_offset = 0
             for mb in micro_batches(g, args.max_cells, args.row_cost, fit_rng if args.fit_rows else None):
+                if sample_diagnostic:
+                    micro_batch_count += 1
                 if args.trainable == "adapter":
                     cat = mb.get("cat_mask")
                     if cat is None or not bool((cat & (torch.arange(cat.shape[1])[None] < mb["d"][:, None])).any()):
                         continue  # the frozen model's loss on tables without categorical columns has no gradient
+                if nan_guard is not None:
+                    nan_guard.record(mb, group_index, task_offset)
+                    task_offset += mb["X"].shape[0]
                 with torch.autocast("cuda", dtype=torch.bfloat16):
-                    losses = task_loss(model, mb, device, cfg.label_slots, args.ccmm_weight)
+                    if args.decoder_attn_zloss:
+                        losses = task_loss_v2(model, mb, device, args.decoder_attn_zloss, zloss_stats)
+                    else:
+                        losses = (task_loss_v2(model, mb, device) if args.arch == "v2"
+                                  else task_loss(model, mb, device, cfg.label_slots, args.ccmm_weight))
                 loss = losses.sum() / n_tasks
                 loss.backward()
                 # Match Python's double accumulation, without a host read per microbatch.
                 step_loss.add_(loss.detach().double())
+                if zloss_stats:  # the z-loss share of loss (regression micro-batches add nothing)
+                    zloss_acc.add_(zloss_stats.pop("attn_zloss").sum().double() / n_tasks)
+        if nan_guard is not None:
+            nan_guard.check_local(params)
         if world > 1:
             allreduce_grads(params)
-        gnorm = torch.nn.utils.clip_grad_norm_(params, args.clip)
+        details = diagnostic.finish(opts) if sample_diagnostic else None
+        if details is not None:
+            details["rank_batch"] = dict(rank=rank, tasks=n_local, micro_batches=micro_batch_count,
+                                       n_train_min=min(g["n_train"] for g in groups),
+                                       n_train_max=max(g["n_train"] for g in groups),
+                                       features_max=max(int(g["d"].max()) for g in groups))
+        gnorm = (torch.nn.utils.clip_grad_norm_(params, args.clip) if nan_guard is None
+                 else nan_guard.clip(params, args.clip))
+        if diagnostic is not None:
+            diagnostic_norms.append(gnorm.detach())
         for o in opts:
             o.step()
             o.zero_grad(set_to_none=True)
@@ -611,10 +965,28 @@ def main():
         if step % args.log_every == 0:
             if world > 1:
                 dist.all_reduce(loss_acc)  # each rank holds its share of the global mean
+                if args.decoder_attn_zloss:
+                    dist.all_reduce(zloss_acc)
             logged_loss = float(loss_acc) / n_acc
             dt = time.time() - t0
             line = dict(step=step, loss=logged_loss, lr=lr, gnorm=float(gnorm), tasks_per_s=tasks_seen / dt,
                         s_per_step=dt / n_acc)
+            if args.decoder_attn_zloss:  # included in loss; loss - attn_zloss is the task loss
+                line["attn_zloss"] = float(zloss_acc) / n_acc
+                zloss_acc.zero_()
+            if details is not None:
+                norms = torch.stack(diagnostic_norms)
+                details["window"] = dict(steps=len(norms), gnorm_median=float(norms.median()),
+                                         gnorm_max=float(norms.max()),
+                                         clip_fraction=float((norms > args.clip).float().mean()),
+                                         nonfinite_norms=int((~torch.isfinite(norms)).sum()))
+                # Keep every norm to reconstruct exact medians over longer windows.
+                details["window"]["gnorm_values"] = norms.cpu().tolist()
+                details["optimizer_groups"] = [
+                    [dict(lr=g["lr"], weight_decay=g["weight_decay"], parameters=len(g["params"]))
+                     for g in o.param_groups] for o in opts]
+                line["diagnostics"] = details
+                diagnostic_norms.clear()
             if main_rank:
                 print(json.dumps({k: round(v, 5) if isinstance(v, float) else v for k, v in line.items()}), flush=True)
                 log.write(json.dumps(line) + "\n")
@@ -629,7 +1001,12 @@ def main():
                 sync_replicas([model, ema])
             if main_rank:
                 ck = dict(model=model.state_dict(), ema=ema.state_dict(), opts=[o.state_dict() for o in opts],
-                          step=step, config=asdict(cfg))
+                          step=step, config=asdict(cfg), cat_mask_drop=args.cat_mask_drop)
+                if args.decoder_scaling_lr_factor != 1:
+                    ck.update(optimizer_param_names=optimizer_names(opts, model),
+                              decoder_scaling_lr_factor=args.decoder_scaling_lr_factor)
+                if args.decoder_attn_zloss:
+                    ck["decoder_attn_zloss"] = args.decoder_attn_zloss
                 torch.save(ck, run_dir / "ckpt.pt.tmp")
                 (run_dir / "ckpt.pt.tmp").replace(ckpt_path)
         if main_rank and (step % args.eval_every == 0 or step == args.steps):
@@ -641,10 +1018,12 @@ def main():
             if args.no_lite:
                 continue
             te = time.time()
-            s, g_rank = lite_eval(ema, device, run_dir / f"lite_step{step:06d}.csv")
+            s, g_rank = lite_eval(ema, device, run_dir / f"lite_step{step:06d}.csv", args.arch, args.view == "typed")
             print(f"=== lite eval step {step} ({time.time() - te:.0f}s)\n{s.round(4).to_string()}\n{g_rank.round(2).to_string()}",
                   flush=True)
             model.train()
+    if diagnostic is not None:
+        diagnostic.close()
     if world > 1:
         dist.barrier()  # rank 0 may still be saving or evaluating the last step
         dist.destroy_process_group()

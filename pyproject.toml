@@ -4,14 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "LightPFN"
-version = "1.1.0"
-description = "A 4.6M-parameter tabular classifier pretrained only on synthetic data, with a scikit-learn API and CPU, CUDA/ROCm and Vulkan inference"
+version = "1.5.0"
+description = "Compact tabular classification and quantile regression pretrained only on synthetic data, with a scikit-learn API"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Giorgio Ottoboni", email = "247403232+GioOtto@users.noreply.github.com"}]
-keywords = ["tabular", "classification", "in-context learning", "foundation model", "tabpfn", "scikit-learn", "vulkan"]
+keywords = ["tabular", "classification", "regression", "in-context learning", "foundation model", "tabpfn", "scikit-learn", "vulkan"]
 dependencies = [
   "numpy>=1.24",
   "torch>=2.6",
@@ -43,17 +43,18 @@ dev = ["pytest>=8", "pandas>=2.0", "build>=1.2"]
 [project.urls]
 Homepage = "https://github.com/GioOtto/LightPFN"
 Documentation = "https://github.com/GioOtto/LightPFN/blob/main/docs/en/GUIDE.md"
-Paper = "https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN_report.pdf"
+Paper = "https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN15_report.pdf"
+"Report of 1.1" = "https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN_report.pdf"
 Weights = "https://huggingface.co/ueuegio/LightPFN"
 Issues = "https://github.com/GioOtto/LightPFN/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["lightpfn"]
 # the wheel holds inference only; training, priors and evaluation stay in the source repository
-exclude = ["lightpfn/train.py", "lightpfn/prior", "lightpfn/eval", "lightpfn/model/ccmm.py"]
+exclude = ["lightpfn/train.py", "lightpfn/train_stability.py", "lightpfn/model_v2", "lightpfn/prior", "lightpfn/eval", "lightpfn/model/ccmm.py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/lightpfn", "/pyproject.toml", "/LICENSE", "/NOTICE", "/README.md",
-           "/tests/test_release.py", "/tests/test_sklearn_api.py", "/tests/test_sklearn_context.py"]
-exclude = ["lightpfn/train.py", "lightpfn/prior", "lightpfn/eval", "lightpfn/model/ccmm.py", "**/__pycache__"]
+include = ["/lightpfn", "/CHANGELOG.md", "/pyproject.toml", "/LICENSE", "/NOTICE", "/README.md",
+           "/tests/test_release_v2.py", "/tests/test_regressor_api.py", "/tests/test_release.py", "/tests/test_sklearn_api.py", "/tests/test_sklearn_context.py"]
+exclude = ["lightpfn/train.py", "lightpfn/train_stability.py", "lightpfn/model_v2", "lightpfn/prior", "lightpfn/eval", "lightpfn/model/ccmm.py", "**/__pycache__"]
 

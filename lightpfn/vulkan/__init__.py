@@ -2,6 +2,10 @@
 Windows), through wgpu (`pip install wgpu`). The WGSL kernels in kernels.py are compiled to SPIR-V when the
 backend starts; no Vulkan SDK or compiler is needed.
 
+Classification (including the categorical adapter) and quantile regression are supported in fp32.
+Column/category statistics, rank lookup, target normalization and quantile head readout stay on the host;
+cell embeddings, categorical-statistics projections, column/row stages, ICL and decoder attention run on the GPU.
+
     from lightpfn.vulkan import VulkanLightPFN, is_available
     net = VulkanLightPFN(model)              # first GPU with a Vulkan driver
     ctx = net.encode(X_train, y_train, n_classes=C)

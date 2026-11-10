@@ -269,8 +269,8 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
 }
 """
 
-# In place on rows of W4 vec4: optional LayerNorm (weight, bias, eps), then optional + emb[slot[z]], where
-# slot index = r / P[4] (the training row of a cell).
+# In place on rows of W4 vec4: optional LayerNorm (weight, bias, eps), then optional + emb[slot[z]] (or
+# emb[z] without Slot), where z = r / P[4] (the training row of a cell).
 # P: [0] rows, [1] grid x, [2] W4, [3] eps, [4] rows per slot, [6..11] view
 ROWNORM = """
 const W4: u32 = {W4}u;
@@ -281,7 +281,9 @@ const W4: u32 = {W4}u;
 #endif
 #if EMB
 @group(0) @binding(4) var<storage, read> Emb: array<vec4<f32>>;
+#if SLOT
 @group(0) @binding(5) var<storage, read> Slot: array<u32>;
+#endif
 #endif
 
 @compute @workgroup_size(64)
@@ -300,12 +302,20 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
   let rstd = inverseSqrt((q.x + q.y + q.z + q.w) / f32(W4 * 4u) + pf(3u));
   for (var c = 0u; c < W4; c++) { x[c] = (x[c] - mean) * rstd * Lw[c] + Lb[c]; }
 #if EMB
+#if SLOT
   let e = Slot[r / P[4]] * W4;
+#else
+  let e = (r / P[4]) * W4;
+#endif
   for (var c = 0u; c < W4; c++) { x[c] += Emb[e + c]; }
 #endif
   for (var c = 0u; c < W4; c++) { X[b + c] = x[c]; }
 #else
+#if SLOT
   let e = Slot[r / P[4]] * W4;
+#else
+  let e = (r / P[4]) * W4;
+#endif
   for (var c = 0u; c < W4; c++) { X[b + c] += Emb[e + c]; }
 #endif
 }
@@ -314,8 +324,8 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
 # Cell features for the embedding GEMM, one thread per cell of a block of the (B, n, m) table: cells c in
 # (b, ii, jj) order over B x nr rows (from row i0) x mc columns (from column j0). Inputs z, r, nan are the
 # normalized values of the whole table; neighbors are the group offsets (j + o) % m.
-# Output row c, KP floats: fourier [sum_g sin(z_g f), sum_g cos(z_g f)] (2F) or rbf kernels (64), then
-# [z_g, nan_g, sin(r_g pi 2^e), cos(r_g pi 2^e)], zero padded.
+# Output row c, KP floats: fourier [sum_g sin(z_g f), sum_g cos(z_g f)] (2F, or 4F with CAT: numerical then
+# categorical group members) or rbf kernels (64), then [z_g, nan_g, sin(r_g pi 2^e), cos(r_g pi 2^e)], zero padded.
 # P: [0] cells, [1] grid x, [2] n, [3] m, [4] i0, [5] nr, [6] j0, [7] mc
 FEATURES = """
 const G: u32 = {G}u;
@@ -328,6 +338,9 @@ const OFFS = array<u32, {G}>({OFFS});
 @group(0) @binding(3) var<storage, read> Nt: array<f32>;
 @group(0) @binding(4) var<storage, read> Fq: array<f32>;
 @group(0) @binding(5) var<storage, read_write> Out: array<f32>;
+#if CAT
+@group(0) @binding(6) var<storage, read> Cat: array<u32>;
+#endif
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u32) {
@@ -342,11 +355,17 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
   var z: array<f32, {G}>;
   var r: array<f32, {G}>;
   var nn: array<f32, {G}>;
+#if CAT
+  var cg: array<bool, {G}>;
+#endif
   for (var g = 0u; g < G; g++) {
     let jg = (j + OFFS[g]) % m;
     z[g] = Zt[rowbase + jg];
     r[g] = Rt[rowbase + jg];
     nn[g] = Nt[rowbase + jg];
+#if CAT
+    cg[g] = Cat[b * m + jg] != 0u;
+#endif
   }
   let o = c * KP;
   var k = 0u;
@@ -354,6 +373,24 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
   for (var f = 0u; f < NF; f++) {
     var s = 0.0;
     var co = 0.0;
+#if CAT
+    var cs = 0.0;
+    var cco = 0.0;
+    for (var g = 0u; g < G; g++) {
+      let sc = sincos(z[g] * Fq[(select(0u, G, cg[g]) + g) * NF + f]);
+      if (cg[g]) {
+        cs += sc.x;
+        cco += sc.y;
+      } else {
+        s += sc.x;
+        co += sc.y;
+      }
+    }
+    Out[o + f] = s;
+    Out[o + NF + f] = co;
+    Out[o + 2u * NF + f] = cs;
+    Out[o + 3u * NF + f] = cco;
+#else
     for (var g = 0u; g < G; g++) {
       let sc = sincos(z[g] * Fq[g * NF + f]);
       s += sc.x;
@@ -361,8 +398,13 @@ fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) li: u
     }
     Out[o + f] = s;
     Out[o + NF + f] = co;
+#endif
   }
+#if CAT
+  k = 4u * NF;
+#else
   k = 2u * NF;
+#endif
 #else
   for (var t = 0u; t < 64u; t++) {
     var s = 0.0;

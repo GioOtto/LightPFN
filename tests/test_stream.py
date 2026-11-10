@@ -69,6 +69,67 @@ def test_spec_sizes_seeds_and_validation():
         label="v4", prior="graph", version=4, p_binary=.78, weight=.45, seed_base=4_000_000)
     with pytest.raises(ValueError):
         st.parse_prior("v4=graph:4:0.78:0.45")
+    typed = st.parse_prior("v3=graph:3:0.55:0.9:3000000:typed")
+    assert typed == dict(label="v3", prior="graph", version=3, p_binary=.55, weight=.9, seed_base=3_000_000, typed=True)
+    with pytest.raises(ValueError):  # level IDs exist for the graph prior only
+        st.parse_prior("rule=rule:1:0.78:0.1:5000000:typed")
+
+
+def test_typed_prior_reaches_the_generator_and_the_carry_over_check(tmp_path):
+    spec = st.make_spec(100, 2, ["a"], [st.parse_prior("v3=graph:3:0.55:0.9:9000000:typed"), dict(PRIORS[1])])
+    v3, rule = spec["priors"]
+    assert v3["typed"] and "typed" not in rule
+    assert st.gen_command(spec, v3, tmp_path / "v3", 9_000_000, 4, 20)[-1] == "--typed"
+    assert "--typed" not in st.gen_command(spec, rule, tmp_path / "rule", 9_500_000, 4, 20)
+    out = tmp_path / "v3"
+    out.mkdir()
+    for i in range(math.ceil(v3["tasks"] / st.SHARD_TASKS)):
+        (out / f"shard_{i:06d}.pt").write_bytes(b"x")
+    meta = dict(seed=9_000_000, prior="graph", prior_version=3, p_binary=.55, preset="s1b", geometry="ratio",
+                max_features=100)
+    for typed, ok in ((None, False), (False, False), (True, True)):  # an untyped pool is not a typed chunk
+        (out / "meta.json").write_text(json.dumps(meta if typed is None else dict(meta, typed=typed)))
+        assert st.carried_over(out, v3, 9_000_000, spec) is ok
+    untyped = dict(v3)
+    del untyped["typed"]
+    (out / "meta.json").write_text(json.dumps(meta))  # pools from before --typed have no key
+    assert st.carried_over(out, untyped, 9_000_000, spec)
+
+
+def test_until_stops_generator_and_consumer_with_the_schedule_unchanged(tmp_path, monkeypatch):
+    s, spec = init(tmp_path, chunks=4, consumers=("R",))
+    fake = FakeGenerator(s)
+    monkeypatch.setattr(st, "ROOT", tmp_path)
+    # The fake generator writes tiny files; real free space (e.g. a 16 GiB /tmp
+    # tmpfs) must not trigger the production 30 GB disk-space wait loop.
+    monkeypatch.setattr(st, "free_gb", lambda p: 1e6)
+    (tmp_path / "runs" / "train" / "R").mkdir(parents=True)
+    # the consumer has not started: the generator stays `ahead` chunks in front of chunk 0 and stops at `until`
+    assert st.generate(s, ahead=4, run=fake, sleep=lambda _: None, until=2) == 0
+    assert sorted({c[0] for c in fake.calls}) == ["c000000", "c000001"] and not (s / "GEN_DONE").exists()
+    cmds = []
+
+    def fake_train(cmd, **kw):
+        cmds.append(cmd)
+        (tmp_path / "runs" / "train" / "R" / f"ema_step{int(arg(cmd, '--stop-at')):06d}.pt").write_bytes(b"x")
+        return SimpleNamespace(returncode=0)
+
+    evals = []
+    assert st.consume(s, "R", 0, [], eval_script="e.sh", run=fake_train, popen=lambda c, **kw: evals.append(c[-2]),
+                      sleep=lambda _: None, until=2) == 0
+    assert [(arg(c, "--steps"), arg(c, "--stop-at")) for c in cmds] == [("400", "100"), ("400", "200")]
+    assert evals == ["R_s100", "R_s200"]
+    state = st.consumer_state(s, "R")
+    assert state["done"] == 2 and state["state"] == "paused" and state["chunks"] == 4
+    # a paused consumer still holds its next chunk; the consumed ones are gone
+    assert st.floor_chunk(s, spec) == 2
+    assert not any((s / f"c{k:06d}").exists() for k in (0, 1))
+    with pytest.raises(ValueError):
+        st.consume(s, "R", 0, [], run=fake_train, sleep=lambda _: None, until=5)
+    # rerun without until: the generator and the consumer continue to the end of the same schedule
+    assert st.generate(s, ahead=4, run=fake, sleep=lambda _: None) == 0 and (s / "GEN_DONE").exists()
+    assert st.consume(s, "R", 0, [], run=fake_train, sleep=lambda _: None) == 0
+    assert [arg(c, "--stop-at") for c in cmds[2:]] == ["300", "400"] and st.consumer_state(s, "R")["state"] == "done"
 
 
 def test_generate_stays_ahead_cleans_and_finishes(tmp_path, monkeypatch):
@@ -392,12 +453,13 @@ def test_replace_sampling_is_unchanged(tmp_path):
 def test_stream_cli_train_passes_arguments(tmp_path, monkeypatch):
     """The exact command line of stream_launch.sh / stream_pilot.sh reaches consume() intact."""
     got = {}
-    monkeypatch.setattr(st, "consume", lambda *a: got.setdefault("args", a) and 0)
+    monkeypatch.setattr(st, "consume", lambda *a, **kw: got.update(args=a, kw=kw) and 0)
     argv = ["train", str(tmp_path), "--run", "P1", "--gpu", "0,1", "--nproc", "2", "--eval-script", "e.sh",
-            "--chunks", "3", "--", "--warmup", "20", "--config", '{"row_mode":"summary"}', "--seed", "0"]
+            "--chunks", "3", "--until", "2", "--", "--warmup", "20", "--config", '{"row_mode":"summary"}', "--seed", "0"]
     st.main(argv)
     stream, run, gpu, train_args, eval_script, chunks, nproc = got["args"]
     assert (stream, run, gpu, eval_script, chunks, nproc) == (tmp_path.resolve(), "P1", "0,1", Path("e.sh"), 3, 2)
+    assert got["kw"] == dict(until=2)
     assert train_args == ["--warmup", "20", "--config", '{"row_mode":"summary"}', "--seed", "0"]
     with pytest.raises(SystemExit):
         st.main(["status", str(tmp_path), "--", "--seed", "0"])
@@ -411,3 +473,101 @@ def test_stream_cli_init_is_idempotent(tmp_path):
     assert json.loads((s / "spec.json").read_text())["chunks"] == 3
     with pytest.raises(SystemExit):
         st.main(args[:5] + ["4"] + args[6:])
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_classification_spec_and_generator_command_are_byte_unchanged(tmp_path, typed):
+    priors = [dict(p) for p in PRIORS]
+    if typed:
+        priors[0]["typed"] = True
+    expected = dict(chunk_steps=100, chunks=2, total_steps=200, tasks_per_step=32, passes=1, consumers=["a"],
+                    priors=[dict(priors[0], tasks=3072), dict(priors[1], tasks=512)],
+                    margin=.05, preset="s1b", geometry="ratio", max_features=100)
+    old_bytes = json.dumps(expected, indent=2)
+    spec = st.make_spec(100, 2, ["a"], priors)
+    assert json.dumps(spec, indent=2) == old_bytes
+    assert json.dumps(st.make_spec(100, 2, ["a"], priors, task="classification"), indent=2) == old_bytes
+    (tmp_path / "spec.json").write_text(old_bytes)
+    assert st.load_spec(tmp_path) == expected
+    older = dict(spec)
+    older.pop("total_steps")
+    assert arg(st.train_command(tmp_path, older, "a", 1, []), "--steps") == "200"
+    item = spec["priors"][0]
+    assert st.gen_command(spec, item, tmp_path / "v3", 9000000, 4, 20) == [
+        st.sys.executable, "-m", "lightpfn.prior.generate", "--preset", "s1b", "--prior", "graph",
+        "--prior-version", "3", "--geometry", "ratio", "--p-binary", "0.55", "--max-features", "100",
+        "--seed", "9000000", "--n-tasks", "3072", "--n-jobs", "4", "--min-free-gb", "20", "--lookahead", "8",
+        "--out", str(tmp_path / "v3"), *(["--typed"] if typed else [])]
+
+
+def test_regression_spec_cli_roundtrip_and_exact_r2_ab_command(tmp_path, monkeypatch):
+    from runs.analysis_reg_prior_20261105 import r2_ab
+    path = tmp_path / "stream"
+    factors = "filter,noise,tails,discrete"
+    argv = ["init", str(path), "--chunk-steps", "1024", "--chunks", "1", "--consumers", "R",
+            "--margin", "0", "--tasks-per-step", "64", "--passes", "2", "--task", "regression",
+            "--reg-factors", factors, "--prior", "r2=graph:3:0.4:1:3700000"]
+    assert st.main(argv) == st.main(argv) == 0
+    spec = st.load_spec(path)
+    assert spec["task"] == "regression" and spec["reg_factors"] == factors.split(",")
+    assert spec["priors"][0]["tasks"] == r2_ab.TASKS
+    got = []
+    monkeypatch.setattr(r2_ab, "pool", lambda arm: tmp_path / "r2")
+    monkeypatch.setattr(r2_ab, "run", lambda cmd, name: got.append(list(map(str, cmd))))
+    monkeypatch.setattr(r2_ab, "log", lambda msg: None)
+    r2_ab.generate("r2v3")
+    assert st.gen_command(spec, spec["priors"][0], tmp_path / "r2", r2_ab.SEED, r2_ab.JOBS, 10) == got[0]
+
+
+def test_regression_carry_over_does_not_accept_classification_p0_or_other_factors(tmp_path):
+    p = st.parse_prior("r2=graph:3:0.4:1:9000000")
+    spec = st.make_spec(1, 1, ["a"], [p], task="regression", reg_factors="filter,noise,tails,discrete")
+    item = spec["priors"][0]
+    (tmp_path / "shard_000000.pt").write_bytes(b"x")
+    meta = dict(seed=p["seed_base"], prior="graph", prior_version=3, p_binary=.4, preset="s1b", geometry="ratio",
+                max_features=100, typed=True, task="regression", reg_factors=["discrete", "filter", "noise", "tails"])
+    for overrides, ok in (({}, True), ({"reg_factors": []}, False), ({"reg_factors": ["filter"]}, False),
+                          ({"task": "classification"}, False), ({"typed": False}, False)):
+        (tmp_path / "meta.json").write_text(json.dumps(dict(meta, **overrides)))
+        assert st.carried_over(tmp_path, item, p["seed_base"], spec) is ok
+    (tmp_path / "meta.json").write_text(json.dumps(meta))
+    cls_spec = st.make_spec(1, 1, ["a"], [p])
+    assert not st.carried_over(tmp_path, item, p["seed_base"], cls_spec)
+    for kwargs in (dict(task="classification", reg_factors="filter"), dict(task="regression", reg_factors="x"),
+                   dict(task="regression", reg_factors="filter,filter")):
+        with pytest.raises(ValueError):
+            st.make_spec(1, 1, ["a"], [p], **kwargs)
+    with pytest.raises(ValueError):
+        st.make_spec(1, 1, ["a"], [dict(p, prior="rule")], task="regression")
+
+
+def test_partial_last_chunk_keeps_one_cosine_and_rounds_only_data(tmp_path, monkeypatch):
+    s, _ = init(tmp_path, chunks=3, consumers=("R",))
+    spec = st.make_spec(100, 3, ["R"], PRIORS, total_steps=251)
+    st.atomic_json(s / "spec.json", spec)
+    ready_all(s, spec)
+    assert [arg(st.train_command(s, spec, "R", k, []), "--stop-at") for k in range(3)] == ["100", "200", "251"]
+    monkeypatch.setattr(st, "ROOT", tmp_path)
+    (tmp_path / "runs/train/R").mkdir(parents=True)
+    (tmp_path / "runs/train/R/ema_step000251.pt").touch()
+    evals = []
+    assert st.consume(s, "R", "0", [], run=lambda *a, **k: SimpleNamespace(returncode=0),
+                      eval_script="e", popen=lambda c, **k: evals.append(c[-2])) == 0
+    assert evals == ["R"]
+    for total in (200, 301):
+        with pytest.raises(ValueError):
+            st.make_spec(100, 3, ["R"], PRIORS, total_steps=total)
+
+
+def test_regression_v4_default_and_disk_estimate_cli(tmp_path, monkeypatch):
+    p = st.parse_prior("r2=graph:4:0.78:1:9000000")
+    spec = st.make_spec(1, 1, ["a"], [p], task="regression", reg_factors="noise")
+    assert "--p-binary" not in st.gen_command(spec, spec["priors"][0], tmp_path, 9000000, 1, 0)
+    with pytest.raises(ValueError):
+        st.make_spec(1, 1, ["a"], [dict(p, p_binary=.4)], task="regression", reg_factors="noise")
+    calls = []
+    monkeypatch.setattr(st, "generate", lambda *a, **kw: calls.append((a, kw)) or 0)
+    assert st.main(["gen", str(tmp_path), "--gb-per-ktask", ".3", "--until", "2"]) == 0
+    assert calls[0][0][-1] == .3 and calls[0][1] == {"until": 2}
+    with pytest.raises(SystemExit):
+        st.main(["gen", str(tmp_path), "--gb-per-ktask", "nan"])

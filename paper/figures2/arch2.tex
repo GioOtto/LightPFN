@@ -1,0 +1,105 @@
+% LightPFN 1.5: the B4 trunk of the original report (top strip) and the 1.5 additions (panels A-D).
+% Exact to lightpfn/model/lightpfn.py (CellEmbedder._embed, CatStatsEmbed, encode, _encode_regression),
+% lightpfn/model/catstats.py and lightpfn/model/regression.py. Same styles as figures/arch_overview.tex.
+\begin{tikzpicture}[x=1cm, y=1cm]
+\tikzset{eqs/.style={font=\fontsize{6.6}{8.4}\selectfont, align=center, inner sep=1pt, text width=3.7cm},
+         txt/.style={font=\fontsize{6.2}{7.4}\selectfont, align=left, inner sep=0pt, text width=3.66cm, text=black!70},
+         stage/.style={draw=#1!60, fill=#1!13, rounded corners=2pt, font=\fontsize{6.6}{7.6}\selectfont, align=center,
+                       minimum height=0.78cm, text width=1.62cm, inner sep=1pt, line width=0.45pt},
+         badge/.style={circle, fill=#1!80!black, text=white, font=\bfseries\fontsize{6.5}{7}\selectfont, inner sep=0.6pt,
+                       minimum size=0.36cm},
+         cat/.style={draw=black!45, line width=0.3pt, minimum width=0.27cm, minimum height=0.27cm, inner sep=0pt,
+                     font=\fontsize{5.5}{6}\selectfont},
+         mini/.style={draw=#1!60, fill=#1!13, rounded corners=2pt, font=\fontsize{6}{7.2}\selectfont, align=center,
+                      inner sep=2pt, line width=0.4pt}}
+\colorlet{cA}{blue!70!black}\colorlet{cB}{green!50!black}\colorlet{cC}{teal!70!black}\colorlet{cD}{violet!75!black}
+\colorlet{k1}{orange!55}\colorlet{k2}{cyan!45}\colorlet{k3}{magenta!35}
+
+% ---------------------------------------------------------------- trunk strip
+\draw[panel=cin] (0,6.75) rectangle (16.5,8.75);
+\node[stitle=cin] at (0.12,8.63) {LightPFN 1.5: the B4 trunk of the original report and where the 1.5 additions act};
+\foreach \i/\c/\t in {0/cin/{1 Input\\$X$, $y_{\mathrm{ctx}}$, cat mask},
+                      1/ccell/{2 Cell\\embedding},
+                      2/ccol/{3 Column\\encoding},
+                      3/cref/{4 Row\\refinement},
+                      4/ccol/{5 Column\\refinement},
+                      5/crow/{6 Row\\compression},
+                      6/cicl/{7 In-context\\learning},
+                      7/cdec/{8 Retrieval\\decoder}}
+  \node[stage=\c] (s\i) at ({1.05+\i*2.06},7.7) {\t};
+\foreach \i [evaluate=\i as \j using int(\i+1)] in {0,...,6} \draw[flow] (s\i.east) -- (s\j.west);
+\node[badge=cA] at ($(s1.north east)+(-0.05,0.02)$) {A};
+\node[badge=cB] at ($(s1.south east)+(-0.05,-0.02)$) {B};
+\node[badge=cC] at ($(s2.north east)+(-0.05,0.02)$) {C};
+\node[badge=cC] at ($(s4.north east)+(-0.05,0.02)$) {C};
+\node[badge=cC] at ($(s6.north east)+(-0.05,0.02)$) {C};
+\node[badge=cD] at ($(s7.north east)+(-0.05,0.02)$) {D};
+\node[note, anchor=west] at (0.2,6.92) {A, B: categorical adapter, 6,384 parameters (both checkpoints).\quad
+  C, D: regression modules, 163,047 parameters (regressor only).\quad The classification decoder of 1.1 is unchanged.};
+
+% ---------------------------------------------------------------- panels
+\def\W{3.9}\def\H{6.45}
+\foreach \px/\c in {0/cA, 4.2/cB, 8.4/cC, 12.6/cD} \draw[panel=\c] (\px,0) rectangle ++(\W,\H);
+\foreach \a in {3.9, 8.1, 12.3} \draw[bigflow] (\a+0.02,3.2) -- (\a+0.28,3.2);
+
+% A: categorical cell path
+\begin{scope}[shift={(0,0)}]
+\node[stitle=cA] at (0.12,6.33) {A\quad Categorical cell path};
+\node[txt, anchor=north west] at (0.12,5.95) {A cell groups its column with two neighbours ($o\in\{0,1,3\}$). Each member uses the categorical weights if its own column is marked.};
+\foreach \j/\col in {0/white,1/k1,2/white,3/k1,4/white} \node[cat, fill=\col] at ({1.3+\j*0.32},4.6) {};
+\node[note, anchor=east] at (1.08,4.6) {row $i$};
+\node[note, anchor=west] at (2.9,4.6) {marked};
+\node[mini=ccell, text width=1.45cm] (num) at (1.0,3.65) {numeric members\\\texttt{freq}, \texttt{fourier}};
+\node[mini=cA, text width=1.55cm] (cat) at (2.9,3.65) {marked members\\\texttt{cat\_freq}, \texttt{cat\_fourier}};
+\draw[flow] (1.62,4.45) -- (num.north); \draw[flow, cA] (2.26,4.45) -- (cat.north);
+\node[eqs] at (1.95,2.35) {$\Phi^{s}_{ij}=\sum_{o\in s}\,[\sin,\cos]\big(\omega^{s}_o\,z_{i,j+o}\big)$\\[3pt]
+  $e_{ij}=\mathrm{LN}\big(W_f\Phi^{\mathrm{num}}_{ij}+W^{c}_f\Phi^{\mathrm{cat}}_{ij}+W_m\psi_{ij}\big)$};
+\node[note] at (1.95,0.75) {$+48$ and $+2{,}048$ parameters.\\A table without marked columns is\\embedded bit for bit as by the trunk.};
+\end{scope}
+
+% B: ordered target statistics
+\begin{scope}[shift={(4.2,0)}]
+\node[stitle=cB] at (0.12,6.33) {B\quad Ordered target stats};
+\node[txt, anchor=north west] at (0.12,5.95) {Context rows of one marked column in a random order $\pi$. Colour: category (missing values form one).};
+\foreach \j/\col/\y in {0/k1/1,1/k2/0,2/k1/1,3/k3/0,4/k1/0,5/k2/1,6/k1/0} \node[cat, fill=\col] (c\j) at ({0.5+\j*0.36},4.75) {\y};
+\node[cat, fill=k1, line width=0.9pt, draw=cB] (ci) at ({0.5+7*0.36},4.75) {?};
+\node[note] at ({0.5+7*0.36},4.4) {row $i$};
+\foreach \j in {0,2,4} \draw[-{Stealth[length=1mm]}, cB, line width=0.4pt] (c\j.south) to[bend right=30] (ci.south);
+\node[txt, anchor=north west] at (0.12,4.05) {$c$: class counts of the preceding rows of the same category ($n_{\mathrm{used}}$ rows); query rows use all $n_{\mathrm{freq}}$ context rows.};
+\node[eqs] at (1.95,2.3) {$\delta=\dfrac{c-n_{\mathrm{used}}\,p}{n_{\mathrm{used}}+1}$\\[4pt]
+  $u$: $\tfrac14\log(1{+}n_{\mathrm{used}})$, $\tfrac14\log(1{+}n_{\mathrm{freq}})$, $n_{\mathrm{freq}}/n$\\[4pt]
+  $e_{ij}\leftarrow e_{ij}+\mathrm{ts}\big(\textstyle\sum_c\delta_c\,W_y[c]\big)+\mathrm{cnt}(u)$};
+\node[note] at (1.95,0.75) {$p$: context class shares. $W_y$: label\\embedding of the first column stage.\\ts and cnt start at zero.};
+\end{scope}
+
+% C: regression labels
+\begin{scope}[shift={(8.4,0)}]
+\node[stitle=cC] at (0.12,6.33) {C\quad Regression labels};
+\node[txt, anchor=north west] at (0.12,5.95) {Continuous targets replace the class labels in every stage that reads them.};
+\node[mini=cC, text width=3.0cm] (z) at (1.95,4.75) {$z=(y_{\mathrm{ctx}}-\mu_y)/\sigma_y$\\mean and std in float64, std $\ge10^{-6}$};
+\node[mini=ccol, text width=1.0cm, font=\fontsize{5.6}{6.8}\selectfont] (l3) at (0.68,3.45) {stage 3\\col label\\$1\to64$};
+\node[mini=ccol, text width=1.0cm, font=\fontsize{5.6}{6.8}\selectfont] (l5) at (1.95,3.45) {stage 5\\refine label\\$1\to64$};
+\node[mini=cicl, text width=1.0cm, font=\fontsize{5.6}{6.8}\selectfont] (l7) at (3.22,3.45) {stage 7\\ICL label\\$1\to256$};
+\foreach \t in {l3,l5,l7} \draw[flow] (z.south) -- (\t.north);
+\node[eqs] at (1.95,2.15) {stage 7 input rows: $r_i+t$\\task vector $t\in\mathbb{R}^{256}$};
+\node[note] at (1.95,0.75) {$t$ is added to every context and query\\row; the 16 thinking tokens are unchanged.\\Target statistics in B: one channel, prior 0.};
+\end{scope}
+
+% D: moments and quantile head
+\begin{scope}[shift={(12.6,0)}]
+\node[stitle=cD] at (0.12,6.33) {D\quad Quantile head};
+\node[txt, anchor=north west] at (0.12,5.95) {One fused attention pass in fp32 over the context values $V=[z,z^2]$.};
+\matrixbox{0.35}{4.3}{1.2}{0.62}{cdec}
+\node[note] at (0.95,4.61) {$A$};
+\node[font=\scriptsize] at (1.73,4.61) {$\cdot$};
+\matrixbox{1.9}{4.17}{0.46}{0.9}{cin}
+\node[note] at (2.13,4.62) {$z\ z^2$};
+\node[font=\scriptsize] at (2.6,4.61) {$=$};
+\matrixbox{2.82}{4.3}{0.46}{0.62}{cdec}
+\node[note] at (3.05,4.61) {$\hat m$};
+\node[eqs] at (1.95,3.5) {$\hat\mu=\hat m_1$\\$\hat\sigma=\sqrt{\max(\hat m_2-\hat m_1^2,\,10^{-6})}$};
+\node[mini=cD, text width=3.2cm] at (1.95,2.75) {MLP on $[h_q,\hat\mu,\hat\sigma]$: $258\to128\to999$ residuals $r_k$};
+\node[eqs] at (1.95,1.85) {$\hat q_z(\tau_k)=\mathrm{sort}_k\big(\hat\mu+\hat\sigma r_k\big)$\\$\tau_k=k/1000$};
+\node[note] at (1.95,0.75) {Pinball loss. $\hat q=\mu_y+\sigma_y\hat q_z$ in float64;\\point prediction $\int_0^1\hat q(\tau)\,d\tau$.};
+\end{scope}
+\end{tikzpicture}

@@ -1,0 +1,15 @@
+% Source: runs/analysis_speed_20261109_cuda/tabarena_pkg2_cuda/real_comparison.csv
+\begin{tabular}{lrrrr}
+\toprule
+Dataset (rows $\times$ features) & 1.1.0 FP32 (train / pred) & 1.5 Auto (train / pred) & Train speedup & Predict speedup \\
+\midrule
+\texttt{diabetes} (768$\times$8) & 0.261 / 0.220 & 0.192 / 0.156 & $1.36\times$ & $1.41\times$ \\
+\texttt{credit-g} (1,000$\times$20) & 0.207 / 0.177 & 0.191 / 0.133 & $1.08\times$ & $1.33\times$ \\
+\texttt{MIC} (1,699$\times$111) & 0.601 / 0.479 & 0.386 / 0.271 & $1.56\times$ & $1.77\times$ \\
+\texttt{splice} (3,190$\times$60) & 0.318 / 0.272 & 0.225 / 0.151 & $1.42\times$ & $1.80\times$ \\
+\texttt{heloc} (10,459$\times$23) & 0.220 / 0.224 & 0.094 / 0.089 & $2.33\times$ & $2.52\times$ \\
+\texttt{coil2000\_insurance\_policies} (9,822$\times$85) & 0.433 / 0.408 & 0.253 / 0.230 & $1.71\times$ & $1.77\times$ \\
+\texttt{credit\_card\_clients\_default} (30,000$\times$23) & 0.388 / 0.433 & 0.120 / 0.133 & $3.24\times$ & $3.25\times$ \\
+\texttt{Amazon\_employee\_access} (32,769$\times$9) & 0.372 / 0.442 & 0.094 / 0.128 & $3.93\times$ & $3.45\times$ \\
+\bottomrule
+\end{tabular}

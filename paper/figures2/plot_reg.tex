@@ -1,0 +1,39 @@
+% Regression. Left: D3-reg normalized CRPS and RMSE over reg_main / reg_long (one member, 20,000 context rows;
+% plotdata2/reg_milestones.dat). Right: final two-member rule (CPU fp32) per-task RMSE ratio against default GBDTs on
+% D3-reg, sorted by the CatBoost ratio (plotdata2/reg_tasks.dat; runs/release_v2/evidence/rows_d3.csv,
+% runs/eval/external_reg/*.csv).
+\begin{tikzpicture}
+\begin{axis}[name=prog, width=6.2cm, height=4.7cm, xmin=8, xmax=46, xtick={10,20,30,39.063},
+  xticklabels={10k,20k,30k,39k}, xlabel={regression fine-tuning step}, ylabel={D3-reg CRPS / $\sigma_y$},
+  ymin=0.1755, ymax=0.1835, grid=major, grid style={black!12}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}, title style={font=\scriptsize\bfseries, yshift=-4pt},
+  title={D3-reg during fine-tuning (23 datasets)},
+  yticklabel style={/pgf/number format/.cd, fixed, fixed zerofill, precision=3},
+  axis y line*=left, every axis plot/.append style={line width=1.1pt, mark size=1.6pt}]
+\fill[black!6] (axis cs:39.063,0.1755) rectangle (axis cs:46,0.1835);
+\node[font=\tiny, text=black!60, anchor=north] at (axis cs:42.5,0.1832) {reg\_long};
+\node[font=\tiny, text=black!60, anchor=north] at (axis cs:24,0.1832) {reg\_main};
+\addplot[cdata, mark=*] table[x=step_k, y=d3reg_crps] {plotdata2/reg_milestones.dat}; \label{pl:crps}
+\end{axis}
+\begin{axis}[at={(prog.south west)}, width=6.2cm, height=4.7cm, xmin=8, xmax=46, axis x line=none,
+  ymin=0.4065, ymax=0.4225, axis y line*=right, ylabel={RMSE / $\sigma_y$}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}, yticklabel style={/pgf/number format/.cd, fixed, fixed zerofill, precision=3},
+  legend style={font=\tiny, draw=black!30, at={(0.97,0.62)}, anchor=east}]
+\addlegendimage{/pgfplots/refstyle=pl:crps}\addlegendentry{CRPS (left)}
+\addplot[ccell, mark=square*, dashed, line width=1.0pt, mark size=1.4pt] table[x=step_k, y=d3reg_rmse] {plotdata2/reg_milestones.dat};
+\addlegendentry{RMSE (right)}
+\end{axis}
+\begin{axis}[at={(prog.east)}, anchor=west, xshift=3.1cm, width=9.8cm, height=4.7cm, ymode=log, ymin=0.07, ymax=1.5,
+  ytick={0.1,0.25,0.5,0.75,1,1.25}, yticklabels={0.1,0.25,0.5,0.75,1,1.25}, xmin=-0.8, xmax=22.8,
+  xtick=\empty, xlabel={23 D3-reg datasets, sorted by the CatBoost ratio},
+  ylabel={RMSE ratio, LightPFN 1.5 / GBDT}, grid=major, grid style={black!12}, tick label style={font=\scriptsize},
+  label style={font=\scriptsize}, title style={font=\scriptsize\bfseries, yshift=-4pt},
+  title={Final regressor vs default GBDTs, per dataset (below 1: LightPFN better)},
+  legend style={font=\tiny, draw=black!30, at={(0.98,0.04)}, anchor=south east, legend columns=1}]
+\draw[black!60] (axis cs:-0.8,1) -- (axis cs:22.8,1);
+\addplot[only marks, mark=*, mark size=2.0pt, crow] table[x=idx, y=r_cb] {plotdata2/reg_tasks.dat};
+\addplot[only marks, mark=triangle*, mark size=1.8pt, cicl!90!black] table[x=idx, y=r_lgb] {plotdata2/reg_tasks.dat};
+\addplot[only marks, mark=x, mark size=2.2pt, cdec, line width=0.8pt] table[x=idx, y=r_xgb] {plotdata2/reg_tasks.dat};
+\legend{{CatBoost (default), 22/23 below 1},{LightGBM (default)},{XGBoost (default)}}
+\end{axis}
+\end{tikzpicture}

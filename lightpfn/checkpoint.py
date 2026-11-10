@@ -6,6 +6,8 @@ There is deliberately no fallback to unrestricted pickle.
 """
 
 import json
+import os
+import re
 from collections.abc import Mapping
 from dataclasses import asdict
 from importlib.resources import files
@@ -79,12 +81,27 @@ def pretrained_spec():
     return json.loads(files("lightpfn").joinpath("pretrained.json").read_text(encoding="utf-8"))
 
 
-def load_pretrained(*, repo_id=None, revision=None, device="cpu", cache_dir=None, local_files_only=False):
+def validate_pretrained_pin():
+    """Require the immutable release pin before publication."""
+    revision = pretrained_spec()["revision"]
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("LightPFN 1.5 HF revision is a placeholder. Upload the weights and run "
+                         "scripts.publish_hf --record-pin COMMIT before publication, or use a local checkpoint.")
+    return revision
+
+
+def load_pretrained(*, repo_id=None, revision=None, device="cpu", cache_dir=None, local_files_only=False,
+                    task="classifier"):
     """Load the released model, or an explicit repo and revision using cached HF authentication.
 
     A custom repository requires a revision. No remote Python code is executed.
     For private repositories authenticate with `hf auth login` or HF_TOKEN.
     """
+    if task not in ("classifier", "regressor"):
+        raise ValueError("task must be classifier or regressor")
+    local = os.environ.get("LIGHTPFN_WEIGHTS_DIR")
+    if local and repo_id is None and revision is None:
+        return load_model(Path(local) / task, device=device)
     try:
         from huggingface_hub import hf_hub_download
     except ImportError as exc:
@@ -94,14 +111,28 @@ def load_pretrained(*, repo_id=None, revision=None, device="cpu", cache_dir=None
     if revision is None:
         if repo_id != spec["repo_id"]:
             raise ValueError("Provide revision when using a custom Hugging Face repository.")
-        revision = spec["revision"]
+        revision = validate_pretrained_pin()
     if not revision:
         raise ValueError("No pretrained revision configured; provide a checkpoint or explicit revision.")
     options = dict(repo_id=repo_id, revision=revision, cache_dir=cache_dir, local_files_only=local_files_only)
-    config_path = Path(hf_hub_download(filename="config.json", **options))
+    try:
+        from huggingface_hub.utils import EntryNotFoundError
+    except ImportError:  # pragma: no cover - very old huggingface-hub
+        EntryNotFoundError = FileNotFoundError
+    # 1.5 and later keep each model in its own subfolder; 1.0/1.1 revisions (e.g. bd389ab5, tag v1.1.0) hold one
+    # classifier at the root, so a classifier falls back to the root when the subfolder is missing.
+    root = False
+    try:
+        config_path = Path(hf_hub_download(filename="config.json", subfolder=task, **options))
+    except (EntryNotFoundError, FileNotFoundError):
+        if task == "regressor":
+            raise ValueError(f"Revision {revision!r} has no regression weights (1.0/1.1 revisions are classifier only).")
+        root = True
+        config_path = Path(hf_hub_download(filename="config.json", **options))
     # Use the resolved commit from the snapshot path for both files, even when a
     # caller explicitly chose a mutable branch or tag.
-    resolved = config_path.parent.name
-    options["revision"] = resolved
+    options["revision"] = config_path.parent.name if root else config_path.parent.parent.name
+    if not root:
+        options["subfolder"] = task
     weights_path = Path(hf_hub_download(filename="model.safetensors", **options))
     return load_model(weights_path, device=device)

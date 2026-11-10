@@ -296,6 +296,24 @@ class PriorTests(unittest.TestCase):
         self.assertTrue(any(s['n_rows']<20_000 and s['n_features']>40 for s in widths))
         self.assertTrue(max(s['n_features'] for s in widths if s['n_rows']>50_000)<=16)
 
+    def test_min_features(self):
+        # None draws exactly as before; a floor raises the cap draw, stays within the row/cell caps
+        for preset in gen.PRESETS.values():
+            for i in range(50):
+                a=gen.group_specs(np.random.default_rng([9,i]),preset,500,[1,i],'graph','cap',.55,2_000_000)
+                b=gen.group_specs(np.random.default_rng([9,i]),preset,500,[1,i],'graph','cap',.55,2_000_000,None)
+                self.assertEqual(a,b)
+                specs,_=gen.group_specs(np.random.default_rng([9,i]),preset,500,[1,i],'graph','cap',.55,2_000_000,32)
+                n,d=specs[0]['n_rows'],specs[0]['n_features']
+                cap=min(500,max(2,2_000_000//n))
+                self.assertTrue(min(32,cap)<=d<=cap or d<=max(4,n//gen.ROWS_PER_FEATURE))
+        wide=[gen.group_specs(np.random.default_rng([10,i]),gen.PRESETS['s2'],500,[1,i],'graph','cap',.55,2_000_000,32)[0][0]
+              for i in range(400)]
+        self.assertGreater(np.mean([s['n_features']>100 for s in wide]),.4)
+        self.assertTrue(all(s['n_features']>=32 for s in wide))
+        with self.assertRaises(ValueError):
+            gen.group_specs(np.random.default_rng(0),gen.PRESETS['s2'],500,[1,0],'graph','ratio',.55,None,32)
+
     def test_real_prior_determinism_and_small_width(self):
         for prior, version in (("graph", 3), ("graph", 4), ("tree", 4), ("rule", 1)):
             for d,C in ((1,2),(2,3)):

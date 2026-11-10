@@ -18,6 +18,13 @@ STREAM/consumers/<run>.json, STREAM/GEN_DONE or STREAM/GEN_FAILED.
     python -m lightpfn.prior.stream train STREAM --run F1 --gpu 0 --eval-script eval.sh -- \\
         --warmup 2000 --max-cells 1000000 --eval-every 8000 --workers 4 --seed 0 --config '{"row_mode":"summary"}'
     python -m lightpfn.prior.stream status STREAM
+
+Regression (same generator recipe as runs/analysis_reg_prior_20261105/r2_ab.py):
+    python -m lightpfn.prior.stream init REG --chunks 13 --chunk-steps 3125 --total-steps 39063 \
+        --tasks-per-step 64 --passes 2 --consumers R --task regression \
+        --reg-factors filter,noise,tails,discrete --prior r2=graph:3:0.4:1:9000000
+    python -m lightpfn.prior.stream gen REG --gb-per-ktask .3
+The regression trainer needs a quantiles-head config (and --init for warm-start fine-tuning).
 """
 import argparse
 import contextlib
@@ -61,19 +68,23 @@ def stream_lock(stream):
 
 
 def parse_prior(text):
-    """label=prior:version:p_binary:weight:seed_base"""
-    m = re.fullmatch(r"([A-Za-z0-9_]+)=(graph|rule|tree):(\d+):([0-9.]+):([0-9.]+):(\d+)", text)
-    if m is None:
-        raise ValueError(f"prior must be label=prior:version:p_binary:weight:seed_base, got {text!r}")
-    label, prior, version, p_binary, weight, seed_base = m.groups()
+    """label=prior:version:p_binary:weight:seed_base[:typed] (typed: graph pools with level IDs, generate --typed)"""
+    m = re.fullmatch(r"([A-Za-z0-9_]+)=(graph|rule|tree):(\d+):([0-9.]+):([0-9.]+):(\d+)(:typed)?", text)
+    if m is None or (m[7] and m[2] != "graph"):
+        raise ValueError(f"prior must be label=prior:version:p_binary:weight:seed_base[:typed], got {text!r}")
+    label, prior, version, p_binary, weight, seed_base, typed = m.groups()
+    # The key only when typed: the specs of the untyped streams stay as they were.
     return dict(label=label, prior=prior, version=int(version), p_binary=float(p_binary),
-                weight=float(weight), seed_base=int(seed_base))
+                weight=float(weight), seed_base=int(seed_base), **({"typed": True} if typed else {}))
 
 
-def make_spec(chunk_steps, chunks, consumers, priors, margin=0.05, tasks_per_step=TASKS_PER_STEP, passes=1):
+def make_spec(chunk_steps, chunks, consumers, priors, margin=0.05, tasks_per_step=TASKS_PER_STEP, passes=1,
+              task="classification", reg_factors=(), total_steps=None):
     """tasks_per_step: tasks of one optimizer step over every rank (32 x ranks with 4 groups of 8).
     passes: how many times training reads each chunk (epoch sampling; new column order and
-    missingness each time): the chunk holds 1/passes of the tasks drawn from it."""
+    missingness each time): the chunk holds 1/passes of the tasks drawn from it.
+    Optional task/reg_factors only add keys for regression; classification JSON remains unchanged.
+    total_steps may end inside the final chunk; data sizing stays conservative at a whole chunk."""
     if (chunk_steps < 1 or chunks < 1 or not consumers or len(set(consumers)) != len(consumers) or not priors
             or tasks_per_step < 1 or passes < 1):
         raise ValueError("invalid chunk steps/chunks/consumers/priors/tasks per step/passes")
@@ -81,6 +92,20 @@ def make_spec(chunk_steps, chunks, consumers, priors, margin=0.05, tasks_per_ste
         raise ValueError("consumer names must be plain run names")
     if len({p["label"] for p in priors}) != len(priors) or not 0 <= margin <= 1:
         raise ValueError("duplicate prior labels or invalid margin")
+    total_steps = chunk_steps * chunks if total_steps is None else total_steps
+    if not (chunks - 1) * chunk_steps < total_steps <= chunks * chunk_steps:
+        raise ValueError("total_steps must end inside the last chunk")
+    factors = list(reg_factors.split(",") if isinstance(reg_factors, str) and reg_factors else reg_factors)
+    if task not in ("classification", "regression") or (task == "classification" and factors):
+        raise ValueError("reg_factors needs task=regression")
+    if task == "regression":
+        from lightpfn.prior.regression import REG_FACTORS
+        if len(set(factors)) != len(factors) or any(f not in REG_FACTORS for f in factors):
+            raise ValueError("unknown or duplicate regression factors")
+        if any(p["prior"] != "graph" or p["version"] not in ((3, 4) if factors else (3,))
+               or p.get("typed") or p["p_binary"] != (0.4 if p["version"] == 3 else 0.78) for p in priors):
+            raise ValueError("regression needs graph v3 (v4 with factors), no :typed, p_binary=0.4 (v3) / 0.78 (v4) "
+                             "(generate.py default; unused for regression targets)")
     total = sum(p["weight"] for p in priors)
     if not total > 0 or any(not p["weight"] > 0 or not 0 <= p["p_binary"] <= 1 for p in priors):
         raise ValueError("weights must be positive and p_binary in [0, 1]")
@@ -94,9 +119,10 @@ def make_spec(chunk_steps, chunks, consumers, priors, margin=0.05, tasks_per_ste
         # rarely run out, which would reread a few shards.
         tasks = math.ceil(w * chunk_steps * tasks_per_step * (1 + margin) / passes / SHARD_TASKS) * SHARD_TASKS
         out.append(dict(p, weight=w, tasks=tasks))
-    return dict(chunk_steps=chunk_steps, chunks=chunks, total_steps=chunk_steps * chunks,
+    return dict(chunk_steps=chunk_steps, chunks=chunks, total_steps=total_steps,
                 tasks_per_step=tasks_per_step, passes=passes, consumers=list(consumers), priors=out,
-                margin=margin, preset="s1b", geometry="ratio", max_features=100)
+                margin=margin, preset="s1b", geometry="ratio", max_features=100,
+                **(dict(task=task, reg_factors=factors) if task == "regression" else {}))
 
 
 def load_spec(stream):
@@ -152,17 +178,38 @@ def carried_over(out, item, seed, spec):
         return False
     meta = json.loads((out / "meta.json").read_text())
     want = dict(seed=seed, prior=item["prior"], prior_version=item["version"], p_binary=item["p_binary"],
-                preset=spec["preset"], geometry=spec["geometry"], max_features=spec["max_features"])
-    return all(meta.get(key) == value for key, value in want.items())
+                preset=spec["preset"], geometry=spec["geometry"], max_features=spec["max_features"],
+                typed=item.get("typed", False))
+    # Regression generation sets typed=True itself and canonicalizes the factors in meta.json.
+    # Old classification meta/spec files have neither task nor reg_factors.
+    if spec.get("task") == "regression":
+        want.update(task="regression", typed=True)
+        if spec.get("reg_factors"):
+            want["reg_factors"] = sorted(spec["reg_factors"])
+    elif meta.get("task", "classification") != "classification":
+        return False
+    if sorted(meta.get("reg_factors", [])) != sorted(spec.get("reg_factors", [])):
+        return False
+    return all(meta.get(key, False if key == "typed" else None) == value for key, value in want.items())
 
 
 def gen_command(spec, item, out, seed, n_jobs, min_free_gb, lookahead=8):
     # --lookahead only schedules (shards byte-identical): more shards in flight keep many workers busy
+    if spec.get("task") == "regression":
+        # Same semantic arguments, defaults and order as r2_ab.py; no --p-binary or --typed:
+        # generate.py chooses its legacy default and sets typed=True for regression.
+        return [sys.executable, "-u", "-m", "lightpfn.prior.generate", "--preset", spec["preset"], "--prior", item["prior"],
+                "--prior-version", str(item["version"]), "--task", "regression", "--geometry", spec["geometry"],
+                "--max-features", str(spec["max_features"]), "--seed", str(seed), "--n-tasks", str(item["tasks"]),
+                "--n-jobs", str(n_jobs), "--min-free-gb", str(min_free_gb), "--lookahead", str(lookahead),
+                "--out", str(out),
+                *(["--reg-factors", ",".join(spec["reg_factors"])] if spec.get("reg_factors") else [])]
     return [sys.executable, "-m", "lightpfn.prior.generate", "--preset", spec["preset"], "--prior", item["prior"],
             "--prior-version", str(item["version"]), "--geometry", spec["geometry"],
             "--p-binary", str(item["p_binary"]), "--max-features", str(spec["max_features"]),
             "--seed", str(seed), "--n-tasks", str(item["tasks"]), "--n-jobs", str(n_jobs),
-            "--min-free-gb", str(min_free_gb), "--lookahead", str(lookahead), "--out", str(out)]
+            "--min-free-gb", str(min_free_gb), "--lookahead", str(lookahead), "--out", str(out),
+            *(["--typed"] if item.get("typed") else [])]
 
 
 def _nice():
@@ -174,13 +221,17 @@ def free_gb(path):
 
 
 def generate(stream, n_jobs=92, ahead=4, min_free_gb=30.0, lookahead=8, gb_per_ktask=0.09, poll=60, retries=3,
-             run=subprocess.run, sleep=time.sleep):
+             run=subprocess.run, sleep=time.sleep, until=None):
+    """until: generate only the first `until` chunks (the consumers stop there with `until` too)."""
     spec = load_spec(stream)
+    until = until or spec["chunks"]
+    if not 1 <= until <= spec["chunks"]:
+        raise ValueError(f"until must be in 1..{spec['chunks']}")
     chunk_gb = gb_per_ktask * sum(p["tasks"] for p in spec["priors"]) / 1000
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="", OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
                MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
     (stream / "GEN_FAILED").unlink(missing_ok=True)  # a rerun is a retry
-    for k in range(spec["chunks"]):
+    for k in range(until):
         cdir = chunk_dir(stream, k)
         waited, last_note = 0.0, -1
         while True:
@@ -223,13 +274,17 @@ def generate(stream, n_jobs=92, ahead=4, min_free_gb=30.0, lookahead=8, gb_per_k
         atomic_json(cdir / "READY", dict(chunk=k, seconds=time.monotonic() - t0,
                                          tasks={p["label"]: p["tasks"] for p in spec["priors"]}))
         log(f"chunk {k} ready in {time.monotonic() - t0:.0f}s")
+    if until < spec["chunks"]:
+        log(f"first {until} chunks generated (until); a rerun without it continues")
+        return 0
     (stream / "GEN_DONE").write_text("done\n")
     log("all chunks generated")
     return 0
 
 
 def train_command(stream, spec, run_name, k, train_args, chunks=None, nproc=1):
-    total = (chunks or spec["chunks"]) * spec["chunk_steps"]
+    total = min((chunks or spec["chunks"]) * spec["chunk_steps"],
+                spec.get("total_steps", spec["chunks"] * spec["chunk_steps"]))
     pools = [f"{chunk_dir(stream, k) / p['label']}:{p['weight']}" for p in spec["priors"]]
     stop = min((k + 1) * spec["chunk_steps"], total)
     launcher = [sys.executable, "-m", "lightpfn.train"] if nproc == 1 else [
@@ -239,9 +294,10 @@ def train_command(stream, spec, run_name, k, train_args, chunks=None, nproc=1):
 
 
 def consume(stream, run_name, gpu, train_args, eval_script=None, chunks=None, nproc=1, poll=60, retries=2,
-            run=subprocess.run, popen=subprocess.Popen, sleep=time.sleep):
+            run=subprocess.run, popen=subprocess.Popen, sleep=time.sleep, until=None):
     """Train run_name on the first `chunks` chunks (default all): its schedule ends at chunks x chunk_steps.
-    gpu: one index, or a comma list with nproc > 1 (data parallel over those GPUs through torchrun)."""
+    gpu: one index, or a comma list with nproc > 1 (data parallel over those GPUs through torchrun).
+    until: stop after that many chunks with the schedule unchanged ("paused"; a rerun without it continues)."""
     spec = load_spec(stream)
     if run_name not in spec["consumers"]:
         raise ValueError(f"{run_name} is not a consumer of {stream}")
@@ -255,6 +311,9 @@ def consume(stream, run_name, gpu, train_args, eval_script=None, chunks=None, np
     chunks = chunks or spec["chunks"]
     if not 1 <= chunks <= spec["chunks"]:
         raise ValueError(f"chunks must be in 1..{spec['chunks']}")
+    until = until or chunks
+    if not 1 <= until <= chunks:
+        raise ValueError(f"until must be in 1..{chunks}")
     state = consumer_state(stream, run_name)
     if state.setdefault("chunks", chunks) != chunks:
         raise ValueError(f"{run_name} started with {state['chunks']} chunks: its LR schedule depends on it")
@@ -265,8 +324,8 @@ def consume(stream, run_name, gpu, train_args, eval_script=None, chunks=None, np
     write_consumer(stream, run_name, state)
     env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), PYTORCH_ALLOC_CONF="expandable_segments:True")
     run_dir = ROOT / "runs" / "train" / run_name
-    total = chunks * spec["chunk_steps"]
-    for k in range(state["done"], chunks):
+    total = min(chunks * spec["chunk_steps"], spec.get("total_steps", spec["chunks"] * spec["chunk_steps"]))
+    for k in range(state["done"], until):
         ready, waited = chunk_dir(stream, k) / "READY", 0.0
         while not ready.exists():
             if (stream / "GEN_FAILED").exists():
@@ -302,6 +361,10 @@ def consume(stream, run_name, gpu, train_args, eval_script=None, chunks=None, np
             with open(ROOT / "runs" / "eval_remote.log", "a") as f:
                 popen(["flock", str(ROOT / "runs" / ".eval.lock"), str(eval_script), name, str(ckpt)],
                       cwd=ROOT, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+    if until < chunks:
+        write_consumer(stream, run_name, dict(state, state="paused"))
+        log(f"{run_name}: paused after {until} of {chunks} chunks")
+        return 0
     write_consumer(stream, run_name, dict(state, state="done"))
     cleanup(stream, spec)  # a finished consumer no longer holds chunks
     log(f"{run_name}: all {chunks} chunks done")
@@ -333,17 +396,23 @@ def main(argv=None):
     i.add_argument("stream", type=Path)
     i.add_argument("--chunk-steps", type=int, default=8000)
     i.add_argument("--chunks", type=int, required=True)
+    i.add_argument("--total-steps", type=int, help="optional partial final chunk; default chunks x chunk-steps")
     i.add_argument("--consumers", nargs="+", required=True)
     i.add_argument("--prior", action="append", required=True, type=parse_prior)
     i.add_argument("--margin", type=float, default=0.05)
     i.add_argument("--tasks-per-step", type=int, default=TASKS_PER_STEP, help="over every rank: 32 x ranks")
     i.add_argument("--passes", type=int, default=1, help="times training reads each chunk")
+    i.add_argument("--task", choices=("classification", "regression"), default="classification")
+    i.add_argument("--reg-factors", default="", help="regression only, as generate.py; p_binary=0.4 (v3) / 0.78 (v4)")
     g = sub.add_parser("gen")
     g.add_argument("stream", type=Path)
     g.add_argument("--n-jobs", type=int, default=92)
     g.add_argument("--ahead", type=int, default=4)
     g.add_argument("--min-free-gb", type=float, default=30.0)
     g.add_argument("--lookahead", type=int, default=8, help="shards in flight per generator (scheduling only)")
+    g.add_argument("--until", type=int, help="generate the first N chunks only")
+    g.add_argument("--gb-per-ktask", type=float, default=0.09,
+                   help="disk headroom estimate; use 0.3 for r2 s1b (default unchanged)")
     t = sub.add_parser("train")
     t.add_argument("stream", type=Path)
     t.add_argument("--run", required=True)
@@ -351,6 +420,7 @@ def main(argv=None):
     t.add_argument("--eval-script", type=Path)
     t.add_argument("--chunks", type=int, help="train on the first N chunks only (default: all)")
     t.add_argument("--nproc", type=int, default=1, help="data-parallel ranks (torchrun), one per --gpu entry")
+    t.add_argument("--until", type=int, help="stop after N chunks, schedule unchanged (default: --chunks)")
     s = sub.add_parser("status")
     s.add_argument("stream", type=Path)
     args = ap.parse_args(argv)
@@ -359,7 +429,7 @@ def main(argv=None):
     stream = args.stream.resolve()
     if args.action == "init":
         spec = make_spec(args.chunk_steps, args.chunks, args.consumers, args.prior, args.margin, args.tasks_per_step,
-                         args.passes)
+                         args.passes, args.task, args.reg_factors, args.total_steps)
         stream.mkdir(parents=True, exist_ok=True)
         if (stream / "spec.json").exists() and load_spec(stream) != spec:
             raise SystemExit(f"{stream}/spec.json exists with other settings")
@@ -367,9 +437,13 @@ def main(argv=None):
         print(json.dumps(spec, indent=2))
         return 0
     if args.action == "gen":
-        return generate(stream, args.n_jobs, args.ahead, args.min_free_gb, args.lookahead)
+        if not math.isfinite(args.gb_per_ktask) or args.gb_per_ktask <= 0:
+            ap.error("--gb-per-ktask must be finite and positive")
+        return generate(stream, args.n_jobs, args.ahead, args.min_free_gb, args.lookahead,
+                        args.gb_per_ktask, until=args.until)
     if args.action == "train":
-        return consume(stream, args.run, args.gpu, train_args, args.eval_script, args.chunks, args.nproc)
+        return consume(stream, args.run, args.gpu, train_args, args.eval_script, args.chunks, args.nproc,
+                       until=args.until)
     status(stream)
     return 0
 

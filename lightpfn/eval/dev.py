@@ -106,7 +106,7 @@ def _evaluation_threads(threads):
 
 
 def evaluate_checkpoint(checkpoint, run, *, dev_dir=D1, device="auto", threads=4,
-                        limit=None, probe_limit=None, probe_seeds=5, classifier=None):
+                        limit=None, probe_limit=None, probe_seeds=5, classifier=None, precision="auto"):
     """CSV per task, D1 family means, and D2 probe means; exactly one estimator."""
     if not 1 <= threads <= 12 or probe_seeds < 1 or (probe_limit is not None and probe_limit < 0):
         raise ValueError("invalid evaluation limits")
@@ -116,12 +116,19 @@ def evaluate_checkpoint(checkpoint, run, *, dev_dir=D1, device="auto", threads=4
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if device not in ("cpu", "cuda"):
         raise ValueError("device must be auto, cpu or cuda")
+    from lightpfn.model_v2.estimator import V2Classifier, load_v2
     from lightpfn.sklearn import LightPFNClassifier
     out = ROOT / "runs/dev" / run
     out.mkdir(parents=True, exist_ok=True)
     rows, probes = [], []
     with _evaluation_threads(threads):
-        clf = classifier or LightPFNClassifier(checkpoint=checkpoint, device=device, n_estimators=1, n_threads=threads, seed=DEV_SEED)
+        if classifier is None:
+            # D1/D2 tasks carry no categorical mask: v2 checkpoints read every column as a number.
+            v2 = load_v2(checkpoint, device)
+            classifier = (V2Classifier(v2, device=device, n_estimators=1, seed=DEV_SEED) if v2 is not None else
+                          LightPFNClassifier(checkpoint=checkpoint, device=device, n_estimators=1, n_threads=threads,
+                                             seed=DEV_SEED, precision=precision))
+        clf = classifier
         for family, task_id, X, y, ntr in dev_tasks(dev_dir, limit):
             t0 = time.perf_counter()
             clf.fit(X[:ntr], y[:ntr])
@@ -161,6 +168,7 @@ def main():
     ev.add_argument("--dev-dir", type=Path, default=D1)
     ev.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     ev.add_argument("--threads", type=int, default=4)
+    ev.add_argument("--precision", choices=["auto", "fp32", "fp16"], default="auto")
     ev.add_argument("--limit", type=int)
     ev.add_argument("--probe-limit", type=int)
     ev.add_argument("--probe-seeds", type=int, default=5)
