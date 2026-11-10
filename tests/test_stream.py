@@ -500,8 +500,7 @@ def test_classification_spec_and_generator_command_are_byte_unchanged(tmp_path, 
         "--out", str(tmp_path / "v3"), *(["--typed"] if typed else [])]
 
 
-def test_regression_spec_cli_roundtrip_and_exact_r2_ab_command(tmp_path, monkeypatch):
-    from runs.analysis_reg_prior_20261105 import r2_ab
+def test_regression_spec_cli_roundtrip_and_generator_command(tmp_path):
     path = tmp_path / "stream"
     factors = "filter,noise,tails,discrete"
     argv = ["init", str(path), "--chunk-steps", "1024", "--chunks", "1", "--consumers", "R",
@@ -510,6 +509,23 @@ def test_regression_spec_cli_roundtrip_and_exact_r2_ab_command(tmp_path, monkeyp
     assert st.main(argv) == st.main(argv) == 0
     spec = st.load_spec(path)
     assert spec["task"] == "regression" and spec["reg_factors"] == factors.split(",")
+    assert spec["priors"][0]["tasks"] == 32768
+    assert st.gen_command(spec, spec["priors"][0], tmp_path / "r2", 3700000, 4, 10) == [
+        st.sys.executable, "-u", "-m", "lightpfn.prior.generate", "--preset", "s1b",
+        "--prior", "graph", "--prior-version", "3", "--task", "regression",
+        "--geometry", "ratio", "--max-features", "100", "--seed", "3700000",
+        "--n-tasks", "32768", "--n-jobs", "4", "--min-free-gb", "10",
+        "--lookahead", "8", "--out", str(tmp_path / "r2"), "--reg-factors", factors,
+    ]
+
+
+def test_regression_generator_matches_local_r2_ab_command(tmp_path, monkeypatch):
+    # The analysis script lives under gitignored runs/ and is unavailable in CI.
+    r2_ab = pytest.importorskip("runs.analysis_reg_prior_20261105.r2_ab",
+                                reason="local analysis script is not checked into Git")
+    factors = "filter,noise,tails,discrete"
+    spec = st.make_spec(1024, 1, ["R"], [st.parse_prior("r2=graph:3:0.4:1:3700000")],
+                        margin=0, tasks_per_step=64, passes=2, task="regression", reg_factors=factors)
     assert spec["priors"][0]["tasks"] == r2_ab.TASKS
     got = []
     monkeypatch.setattr(r2_ab, "pool", lambda arm: tmp_path / "r2")
@@ -517,7 +533,6 @@ def test_regression_spec_cli_roundtrip_and_exact_r2_ab_command(tmp_path, monkeyp
     monkeypatch.setattr(r2_ab, "log", lambda msg: None)
     r2_ab.generate("r2v3")
     assert st.gen_command(spec, spec["priors"][0], tmp_path / "r2", r2_ab.SEED, r2_ab.JOBS, 10) == got[0]
-
 
 def test_regression_carry_over_does_not_accept_classification_p0_or_other_factors(tmp_path):
     p = st.parse_prior("r2=graph:3:0.4:1:9000000")
