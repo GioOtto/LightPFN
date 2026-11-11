@@ -30,9 +30,12 @@ blocchi di in-context learning. `predict_proba(X)` (oppure `predict` / `predict_
 passare nella rete solo le righe di test, a blocchi, e le fa guardare quel contesto in cache. La predizione di
 una riga di test non dipende mai dalle altre righe di test.
 
-In `LightPFNClassifier`, questo descrive il default `cache_context=True`. Con `cache_context=False`, `fit`
-conserva copie degli input; ogni predizione costruisce lo stesso contesto e poi lo libera. Le predizioni non
-cambiano.
+Questo descrive il default `cache_context=True`. Con `cache_context=False` (entrambi gli estimatori), `fit`
+conserva copie degli input; ogni predizione costruisce lo stesso contesto e poi lo libera. Su CUDA/ROCm, quando
+righe di training e di test stanno in un solo blocco, quella predizione codifica il contesto e predice le righe
+di test in un unico passaggio che condivide tra le due tutte le operazioni per riga (circa metà dei lanci di
+kernel GPU): la stessa funzione a meno degli arrotondamenti. È adatto ai modelli dei fold che predicono una
+volta sola, come nel bagging.
 
 In `LightPFNClassifier` con `n_estimators > 1`, il primo estimatore usa l'ordine originale delle feature e degli
 slot di classe, ogni altro una permutazione casuale delle feature e un'assegnazione casuale delle classi agli
@@ -108,7 +111,8 @@ LightPFNClassifier(model=None, checkpoint=None, device="auto", n_estimators=4, m
 ```python
 LightPFNRegressor(model=None, checkpoint=None, device="auto", precision="auto", n_estimators=2,
                   max_context=50000, random_state=0, log_skew=2.0, query_rows=4096, chunk_cells="auto",
-                  n_threads=None, repo_id=None, revision=None, cache_dir=None, local_files_only=False)
+                  n_threads=None, repo_id=None, revision=None, cache_dir=None, local_files_only=False,
+                  fold=False, cache_context=True)
 ```
 
 | Parametro | Default | Significato |
@@ -122,6 +126,8 @@ LightPFNRegressor(model=None, checkpoint=None, device="auto", precision="auto", 
 | `query_rows` | `4096` | righe di test per blocco di predizione |
 | `chunk_cells` | `"auto"` | celle per blocco degli stadi iniziali |
 | `n_threads` | `None` | thread CPU di PyTorch (`torch.set_num_threads`, vale per tutto il processo); `None` lascia l'impostazione di PyTorch |
+| `cache_context` | `True` | conserva il contesto codificato tra le predizioni; `False` conserva gli input e codifica a ogni predizione (in un solo passaggio su CUDA/ROCm per le tabelle piccole), utile per i modelli dei fold usati una volta sola |
+| `fold` | `False` | usa la rete di inferenza "piegata" (stessa funzione a meno degli arrotondamenti) |
 | `checkpoint`, `model`, `repo_id`, `revision`, `cache_dir`, `local_files_only` | `None` / `False` | checkpoint locale, modulo `LightPFN` personalizzato o opzioni di download da Hugging Face |
 
 Entrambi i costruttori memorizzano i parametri e nient'altro, quindi `clone`, `get_params` e `set_params`
@@ -264,13 +270,27 @@ Entrambi gli estimatori accettano `precision="auto"`, `"fp32"` o `"fp16"`:
 - `precision_` registra la modalità scelta durante il `fit`; cambiare `precision` con `set_params` ha effetto al
   `fit` successivo.
 
+Nella 1.5.1 l’MLP che scala l’attenzione usa GEMM 2D durante l’inferenza GPU a precisione ridotta. Evita
+così la chiamata cuBLAS fp16 a batch con stride segnalata in errore con torch 2.15/CUDA 13.2 e driver 580.178
+([segnalazione del maintainer](https://github.com/autogluon/tabarena/pull/719#issuecomment-6770068521)). Le
+eccezioni CUDA vengono propagate: il ripiego per valori non finiti non recupera un accesso illegale alla
+memoria. Dopo un errore CUDA va riavviato il processo prima di provare `precision="fp32"` o torch 2.14.1/CUDA
+13.0. Le librerie di compatibilità del container possono caricare una `libcuda` diversa dal driver host
+mostrato da `nvidia-smi`; nella diagnosi vanno registrate entrambe. L'errore originale non si è riprodotto su
+una RTX 5090 né su una RTX PRO 6000 con lo stesso driver (580.178.04, `libcuda` nativa e di compatibilità) e
+torch 2.15/CUDA 13.2, né con il codice 1.5.0 né con il 1.5.1, sui 30 split di anneal della segnalazione.
+
 ## Velocità
 
 I tempi misurati di fit più predict sono in [RISULTATI.md](RISULTATI.md#costo). In pratica:
 
 - Una GPU è molto più veloce: su una RX 7900 XT, Vulkan e ROCm sono da 6 a 10 volte più veloci di una CPU
-  desktop a 16 thread per la 1.1; nella 1.5 su RTX 5090, `precision="auto"` (fp16) e le fusioni sono circa
-  1,9-2,0 volte più veloci della 1.1.0 sul protocollo 8 fold x 4 membri.
+  desktop a 16 thread per la 1.1. Con il protocollo di TabArena (otto modelli di fold senza cache, poi un refit
+  in cache), la 1.5.1 addestra 1,65 volte e predice 1,64 volte più veloce della 1.1.0 su una RTX 5090 (medie
+  geometriche su 31 task di classificazione; 1,40 e 1,25 volte sulle 17 tabelle fino a 3.000 righe). Le tabelle
+  piccole sono limitate dai lanci dei kernel, non dal lavoro della GPU.
+- Per bagging o validazione incrociata, crea i modelli dei fold con `cache_context=False`: ognuno predice le
+  sue righe di validazione in un solo passaggio.
 - Su CPU, `n_estimators=1` è circa quattro volte più veloce di 4 in classificazione (e due volte più veloce di 2
   in regressione) e perde poca accuratezza.
 - Imposta `n_threads` al numero di core fisici; hyper-threading e core a basso consumo aiutano poco.
@@ -310,6 +330,10 @@ sottocartelle locali `weights/classifier/` e `weights/regressor/` senza accesso 
 `load_model(path)` legge i safetensors con la loro configurazione JSON, oppure file PyTorch `.pt` tramite
 `torch.load(weights_only=True)`. I checkpoint che richiedono oggetti pickle arbitrari vengono rifiutati di
 proposito.
+
+Una cartella `classifier/` o `regressor/` assente a una revisione moderna solleva l’errore di download o
+cache, anche offline con una cache incompleta. Il loader non la sostituisce con il vecchio classificatore
+nella radice. Le revisioni storiche 1.0/1.1 richieste esplicitamente conservano il formato nella radice.
 
 ## Riproducibilità
 

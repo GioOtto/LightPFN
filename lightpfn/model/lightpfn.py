@@ -294,6 +294,17 @@ class ColumnStage(nn.Module):
             x = cb(x, kh, vh)
         return x.view(B, m, n, E).transpose(1, 2)
 
+    def context_query(self, cells, n, y_slots, label=None):
+        """context() of the first n rows of cells followed by query() of the others, in one pass (inference):
+        the inducing points read the first n rows only, and the cell blocks treat rows independently."""
+        B, N, m, E = cells.shape
+        label = self.y_emb(y_slots) if label is None else label.to(cells.dtype)
+        x = torch.cat([cells[:, :n] + label[:, :, None], cells[:, n:]], 1).transpose(1, 2).reshape(B * m, N, E)
+        for ind, ib, cb in zip(self.inducing, self.ind_blocks, self.cell_blocks):
+            h = ib(ind.expand(B * m, -1, -1), *ib.keys_values(x[:, :n]))
+            x = cb(x, *cb.keys_values(h))
+        return x.view(B, m, N, E).transpose(1, 2)
+
 
 class RowStage(nn.Module):
     """Transformer over the features of each row; CLS tokens (no rotation) collect the row."""
@@ -404,6 +415,19 @@ class ICLStage(nn.Module):
         for blk, (k, v) in zip(self.blocks, icl_kv):
             x = blk(x, k, v, kv_heads=self.kv_heads_test)
         return self.norm(x)
+
+    def context_query(self, r, n, y_slots, label=None):
+        """(context(r[:, :n])[0], query(r[:, n:], its cache)) in one pass (inference): the first n rows and
+        the thinking tokens attend to each other, the other rows to them through the cached heads."""
+        B, T = r.shape[0], self.thinking.shape[0]
+        label = self.y_emb(y_slots) if label is None else label.to(r.dtype)
+        x = torch.cat([self.thinking.to(r.dtype).expand(B, -1, -1), r[:, :n] + label, r[:, n:]], dim=1)
+        L = T + n
+        for blk in self.blocks:
+            k, v = blk.keys_values(x[:, :L])
+            x = blk.forward_split(x, L, k, v, self.kv_heads_test)
+        h = self.norm(x)
+        return h[:, T:L], h[:, L:]
 
 
 class RetrievalDecoder(nn.Module):
@@ -681,6 +705,67 @@ class LightPFN(nn.Module):
             raise ValueError("a regression context: use predict_quantiles")
         h = self.icl.query(self._query_rows(ctx, X_test, chunk_cells), ctx.icl_kv)
         return self.decoder(ctx.dec_k, ctx.y, h, ctx.n_classes)
+
+    def encode_predict_logits(self, X_train, y_train, X_test, slots=None, n_classes=None, cat=None, cat_perm=None):
+        """predict_logits(encode(X_train, y_train, ...), X_test) without chunking, in one pass for inference
+        (classification, no feature padding): training and test rows share the row-wise operations (cell
+        embeddings, cell blocks of the column stages, row stages, ICL projections and MLPs), only the
+        attention calls are separate. The same function up to float rounding, with about half the GPU
+        kernel launches when the encoded context is used once (small tables are launch-bound)."""
+        if self.training or torch.is_grad_enabled():
+            raise RuntimeError("encode_predict_logits is for inference")
+        if self.reg is not None:
+            raise ValueError("a regression model: use encode(..., regression=True) and predict_quantiles")
+        B, n = y_train.shape
+        n_classes = int(y_train.max()) + 1 if n_classes is None else n_classes
+        if n_classes > self.cfg.label_slots:
+            raise ValueError(f"{n_classes} classes, the model supports {self.cfg.label_slots}")
+        if slots is None:
+            slots = torch.arange(self.cfg.label_slots, device=X_train.device).expand(B, -1)
+        y_slots = torch.gather(slots, 1, y_train)
+        stats = self.cells.stats(X_train)
+        ci = self._cat_inputs(X_train, y_train, None, slots, n_classes, cat, torch.Generator().manual_seed(0), cat_perm)
+        X = torch.cat([X_train, X_test.to(X_train.dtype)], 1)
+        cells = self.cells(X, stats, catg=None if ci is None else ci["catg"])
+        if ci is not None:
+            feats = torch.cat([ci["feats"], query_stats(ci["table"], X_test)], 1)
+            cells = cells + self.cat_stats(feats, ci["labels"]).to(cells.dtype)
+        col = self.col.context_query(cells, n, y_slots)
+        if self.cfg.row_refine:
+            col = self.col_refine.context_query(self.refine(col), n, y_slots)
+        h_train, h_test = self.icl.context_query(self.row(col), n, y_slots)
+        return self.decoder(self.decoder.keys(h_train), y_train, h_test, n_classes)
+
+    def encode_predict_quantiles(self, X_train, y_train, X_test, cat=None, cat_perm=None):
+        """predict_quantiles(encode(X_train, y_train, regression=True, ...), X_test) without chunking, in one
+        pass (inference, no feature padding), as encode_predict_logits: (B, M, 999) float64 quantiles in the
+        units of y_train, the same function up to float rounding."""
+        if self.training or torch.is_grad_enabled():
+            raise RuntimeError("encode_predict_quantiles is for inference")
+        if self.reg is None:
+            raise ValueError("regression needs a model with Config head='quantiles'")
+        n = y_train.shape[1]
+        z, mean, scale = normalize_targets(y_train)
+        zc = z[..., None]
+        labels = (self.reg.col_label(zc), None if self.reg.refine_label is None else self.reg.refine_label(zc))
+        stats = self.cells.stats(X_train)
+        ci = self._cat_inputs(X_train, None, None, None, 1, cat, torch.Generator().manual_seed(0), cat_perm, z=z)
+        X = torch.cat([X_train, X_test.to(X_train.dtype)], 1)
+        cells = self.cells(X, stats, catg=None if ci is None else ci["catg"])
+        if ci is not None:
+            feats = torch.cat([ci["feats"], query_stats(ci["table"], X_test)], 1)
+            cells = cells + self.cat_stats(feats, ci["labels"]).to(cells.dtype)
+        col = self.col.context_query(cells, n, None, labels[0])
+        if self.cfg.row_refine:
+            col = self.col_refine.context_query(self.refine(col), n, None, labels[1])
+        rows = self.row(col)
+        h_train, h_test = self.icl.context_query(rows + self.reg.task.to(rows.dtype), n, None, self.reg.icl_label(zc))
+        dec_k = self.decoder.keys(h_train)
+        # decoder query, moments and quantile head in float32 even under fp16 autocast, as predict_quantiles
+        with torch.autocast(h_test.device.type, enabled=False):
+            h = h_test.float()
+            q = self.reg.head(h, *self.decoder.moments(dec_k, z, h))
+        return mean[:, None, None] + scale[:, None, None] * q.double()
 
     def predict_quantiles(self, ctx, X_test, chunk_cells=None, normalized=False):
         """Quantiles (B, M, 999) at levels 0.001..0.999 for the test rows of a regression context: float32 in

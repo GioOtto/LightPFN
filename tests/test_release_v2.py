@@ -64,3 +64,21 @@ def test_legacy_revision_uses_root(tmp_path, monkeypatch, revision):
     assert calls[-1]['revision'] == 'bd389ab5'
     with pytest.raises(ValueError, match='no regression'):
         load_pretrained(repo_id='ueuegio/LightPFN', revision=revision, task='regressor')
+
+
+@pytest.mark.parametrize('kind', ['classifier', 'regressor'])
+@pytest.mark.parametrize('offline', [False, True])
+def test_missing_modern_folder_never_loads_root(tmp_path, monkeypatch, kind, offline):
+    from huggingface_hub.utils import EntryNotFoundError, LocalEntryNotFoundError
+    error = LocalEntryNotFoundError if offline else EntryNotFoundError
+    calls = []
+    def download(filename, **options):
+        calls.append(options)
+        if 'subfolder' not in options:
+            pytest.fail('must not read legacy weights from root')
+        raise error('missing modern weights')
+    monkeypatch.delenv('LIGHTPFN_WEIGHTS_DIR', raising=False)
+    monkeypatch.setattr('huggingface_hub.hf_hub_download', download)
+    with pytest.raises((error, ValueError)):
+        load_pretrained(task=kind, local_files_only=offline)
+    assert len(calls) == 1

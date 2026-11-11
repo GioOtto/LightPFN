@@ -48,6 +48,44 @@ def _is_categorical(dtype):
 AUTO_MAX_LEVELS = 20
 
 
+def _numpy_blocks(X, columns):
+    """{dtype: (positions, 2-D array)}: the given DataFrame columns with a plain NumPy numeric dtype, one
+    homogeneous array per dtype (bulk conversion instead of one pandas call per column)."""
+    groups = {}
+    dtypes = X.dtypes
+    for j in columns:
+        dtype = dtypes.iloc[j]
+        if isinstance(dtype, np.dtype) and dtype.kind in "biuf":
+            groups.setdefault(dtype, []).append(j)
+    return {dtype: (idx, X.iloc[:, idx].to_numpy(dtype=dtype)) for dtype, idx in groups.items()}
+
+
+def _auto_column(v, max_levels):
+    """auto_categorical of one column's values (a NumPy array; NaN ignored)."""
+    if v.dtype.kind not in "biuf":
+        v = np.asarray(v, dtype=np.float64)
+    if v.dtype.kind == "f":
+        v = v[~np.isnan(v)]
+        if not np.isfinite(v).all() or not np.all(v == np.floor(v)):
+            return False
+    if not len(v):
+        return False
+    lo, hi = int(v.min()), int(v.max())
+    if lo == hi:
+        return False
+    if hi - lo < max_levels:
+        # Integer range proves the cardinality bound, without sorting binary/count columns.
+        return True
+    # Sparse integer codes can span an arbitrary range. Count exactly, stopping as soon as the
+    # limit is exceeded; never sort a full 50k-row column merely to reject it.
+    levels = set()
+    for start in range(0, len(v), 256):
+        levels.update(np.unique(v[start:start + 256]).tolist())
+        if len(levels) > max_levels:
+            break
+    return len(levels) <= max_levels
+
+
 def auto_categorical(X, max_levels=AUTO_MAX_LEVELS):
     """cat="auto": (m,) bool, DataFrame categorical dtypes plus numeric columns whose values (NaN ignored) are all
     integers with 2..max_levels distinct values. A heuristic: integer-coded nominal columns are found, low-
@@ -61,35 +99,44 @@ def auto_categorical(X, max_levels=AUTO_MAX_LEVELS):
     if X.ndim != 2:
         raise ValueError("auto_categorical needs a 2-D array")
     out = np.zeros(X.shape[1], bool)
-    dtypes = X.dtypes if frame else None
+    if not frame:
+        for j in range(X.shape[1]):
+            out[j] = _auto_column(X[:, j], max_levels)
+        return out
+    dtypes = X.dtypes
+    rest = []
     for j in range(X.shape[1]):
-        if frame and _is_categorical(dtypes.iloc[j]):
+        if _is_categorical(dtypes.iloc[j]):
             out[j] = True
+        else:
+            rest.append(j)
+    blocks = _numpy_blocks(X, rest)
+    done = set()
+    for dtype, (idx, A) in blocks.items():
+        done.update(idx)
+        if not len(A):
             continue
-        v = X.iloc[:, j].dropna().to_numpy() if frame else X[:, j]
-        if v.dtype.kind not in "biuf":
-            v = np.asarray(v, dtype=np.float64)
-        if v.dtype.kind == "f":
-            v = v[~np.isnan(v)]
-            if not np.isfinite(v).all() or not np.all(v == np.floor(v)):
+        # Vectorized screen per dtype block; columns whose integer range exceeds the bound need an exact
+        # count and go through the per-column path, as do the empty and float columns with non-integers.
+        if dtype.kind == "f":
+            nan = np.isnan(A)
+            ok = ((np.isfinite(A) & (A == np.floor(A))) | nan).all(0) & (~nan).any(0)
+            lo = np.where(nan, np.inf, A).min(0)
+            hi = np.where(nan, -np.inf, A).max(0)
+        else:
+            ok = np.ones(A.shape[1], bool)
+            lo, hi = A.min(0), A.max(0)
+        for c, j in enumerate(idx):
+            if not ok[c]:
                 continue
-        if not len(v):
-            continue
-        lo, hi = int(v.min()), int(v.max())
-        if lo == hi:
-            continue
-        if hi - lo < max_levels:
-            # Integer range proves the cardinality bound, without sorting binary/count columns.
-            out[j] = True
-            continue
-        # Sparse integer codes can span an arbitrary range. Count exactly, stopping as soon as the
-        # limit is exceeded; never sort a full 50k-row column merely to reject it.
-        levels = set()
-        for start in range(0, len(v), 256):
-            levels.update(np.unique(v[start:start + 256]).tolist())
-            if len(levels) > max_levels:
-                break
-        out[j] = len(levels) <= max_levels
+            span = int(hi[c]) - int(lo[c])
+            if span == 0:
+                continue
+            out[j] = True if span < max_levels else _auto_column(A[:, c], max_levels)
+    for j in rest:
+        if j not in done:
+            # Nullable extension arrays need dropna() so pd.NA never reaches the numeric conversion.
+            out[j] = _auto_column(X.iloc[:, j].dropna().to_numpy(), max_levels)
     return out
 
 
@@ -99,18 +146,39 @@ def _encode_frame(X, categories):
     with missing and unseen values as NaN; the other columns are converted to numbers."""
     import pandas as pd
 
-    cols = {}
-    for j, name in enumerate(X.columns):
-        s = X.iloc[:, j]
+    out = np.empty(X.shape, dtype=np.float32)
+    numeric = [j for j in range(X.shape[1]) if j not in categories]
+    blocks = _numpy_blocks(X, numeric)
+    for idx, A in blocks.values():
+        out[:, idx] = A
+    done = {j for idx, _ in blocks.values() for j in idx}
+    if len(done) == X.shape[1]:
+        return pd.DataFrame(out, index=X.index, columns=X.columns, copy=False)
+    for j, (_, column) in enumerate(X.items()):  # by position: duplicate names are allowed
         if j in categories:
-            codes = categories[j].get_indexer(s).astype(np.float32)
+            if isinstance(column.dtype, pd.CategoricalDtype):
+                # The position of each category label in the fit categories, read through the integer codes:
+                # get_indexer on the k labels instead of on every row (missing values have code -1).
+                codes = column.array.codes
+                lut = np.append(categories[j].get_indexer(column.dtype.categories), -1)
+                codes = lut[codes]  # code -1 reads the appended -1
+            else:
+                codes = categories[j].get_indexer(column)
+            codes = codes.astype(np.float32)
             codes[codes < 0] = np.nan
-            cols[j] = codes
-        else:
-            cols[j] = pd.to_numeric(s).to_numpy(dtype=np.float32, na_value=np.nan)
-    out = pd.DataFrame(cols, index=X.index)
-    out.columns = X.columns
-    return out
+            out[:, j] = codes
+        elif j not in done:
+            out[:, j] = pd.to_numeric(column).to_numpy(dtype=np.float32, na_value=np.nan)
+    return pd.DataFrame(out, index=X.index, columns=X.columns, copy=False)
+
+
+def _fit_categories(X):
+    """{column position: categories} of the categorical columns of a training DataFrame, in pandas order (a
+    category dtype keeps its own categories and order, unused ones included)."""
+    import pandas as pd
+
+    return {j: dtype.categories if isinstance(dtype, pd.CategoricalDtype) else X.iloc[:, j].astype("category").cat.categories
+            for j, dtype in enumerate(X.dtypes) if _is_categorical(dtype)}
 
 
 def stratified_subsample(rng, y, n, min_per_class=5):
@@ -284,8 +352,7 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         self._frame_columns = X.columns.copy() if _is_frame(X) else None
         if _is_frame(X):
             # categories of the training rows, in pandas order (a category dtype keeps its own order)
-            self.categories_ = {j: X.iloc[:, j].astype("category").cat.categories
-                                for j, dtype in enumerate(X.dtypes) if _is_categorical(dtype)}
+            self.categories_ = _fit_categories(X)
             X = _encode_frame(X, self.categories_)
         X, y = validate_data(self, X, y, dtype=np.float32, ensure_all_finite="allow-nan")
         check_classification_targets(y)
@@ -476,6 +543,8 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         if _is_frame(X) and X.shape[1] == len(self.is_categorical_):
             X = _encode_frame(X, self.categories_)
         X = validate_data(self, X, reset=False, dtype=np.float32, ensure_all_finite="allow-nan")
+        if self._uncached_data is not None and self._one_pass(len(X)):
+            return self._predict_one_pass(X)
         try:
             if self._uncached_data is not None:
                 self._build_members(*self._uncached_data)
@@ -483,6 +552,45 @@ class LightPFNClassifier(ClassifierMixin, BaseEstimator):
         finally:
             if self._uncached_data is not None:
                 self.members_.clear()
+
+    def _one_pass(self, n_test):
+        """cache_context=False on CUDA/ROCm: encode and predict together when no piece would be chunked
+        (small tables, where kernel launches dominate the time)."""
+        X, _, plans = self._uncached_data
+        if kind(self.fit_device_) != "cuda" or not fuse_enabled("onepass") or n_test < 1 or n_test > self.chunk_rows:
+            return False
+        if not hasattr(self.fit_net_, "encode_predict_logits") or getattr(self.fit_net_, "reg", None) is not None:
+            return False
+        group = self._group(len(plans[0][0]), X.shape[1])
+        return group * (len(plans[0][0]) + n_test) * X.shape[1] <= self._chunk_cells()
+
+    def _predict_one_pass(self, X):
+        """predict_proba of an uncached fit through LightPFN.encode_predict_logits: the same estimators,
+        groups and float64 averaging as _build_members + _predict_encoded, without storing the contexts."""
+        Xc, y, plans = self._uncached_data
+        group = self._group(len(plans[0][0]), Xc.shape[1])
+        tdev = self._tensor_device()
+        P = np.zeros((len(X), len(self.classes_)))
+        with self._autocast():
+            net = self._inference_net()
+            for g in range(0, len(plans), group):
+                part = plans[g : g + group]
+                Xt = torch.from_numpy(np.stack([Xc[rows][:, feats] for rows, feats, _, _ in part])).to(tdev)
+                yt = torch.from_numpy(np.stack([y[rows] for rows, _, _, _ in part])).long().to(tdev)
+                st = torch.from_numpy(np.stack([slots for _, _, slots, _ in part])).long().to(tdev)
+                Xq = torch.from_numpy(np.stack([X[:, feats] for _, feats, _, _ in part])).to(tdev)
+                kw = dict(slots=st, n_classes=len(self.classes_))
+                if self.cat_ is not None:
+                    kw["cat"] = torch.from_numpy(np.stack([self.cat_[feats] for _, feats, _, _ in part])).to(tdev)
+                    kw["cat_perm"] = torch.from_numpy(np.stack([order for _, _, _, order in part])).to(tdev)
+                logits = net.encode_predict_logits(Xt, yt, Xq, **kw)
+                if self.precision_ == "fp16" and not torch.isfinite(logits).all():
+                    self._precision_fallback("one-pass group")
+                    with torch.autocast("cuda", enabled=False):
+                        logits = self.fit_net_.encode_predict_logits(Xt, yt, Xq, **kw)
+                for p in torch.softmax(logits.float(), -1).cpu().numpy():  # one estimator at a time, float64
+                    P += p
+        return P / P.sum(1, keepdims=True)
 
     def _predict_encoded(self, X):
         with self._autocast():
@@ -572,16 +680,28 @@ def _floating_tensors(obj, path=()):
 
 def _context_isfinite(ctx):
     checks = []
+    activations = {}
     for path, tensor in _floating_tensors(ctx):
-        valid = torch.isfinite(tensor)
         # These two metadata arrays deliberately use +inf for missing values/padding.
         # Neither is an activation produced by autocast.
         if path == ("stats", "sorted"):
             padding = torch.arange(tensor.shape[-1], device=tensor.device) >= ctx.stats["cnt"][..., None]
-            valid = valid | (padding & torch.isposinf(tensor))
+            valid = torch.isfinite(tensor) | (padding & torch.isposinf(tensor))
         elif path == ("extra", "cat_table", "keys"):
-            valid = valid | torch.isposinf(tensor)
+            valid = torch.isfinite(tensor) | torch.isposinf(tensor)
+        elif tensor.device.type == "cuda":
+            if tensor.numel():
+                activations.setdefault((tensor.device, tensor.dtype), []).append(tensor)
+            continue
+        else:
+            valid = torch.isfinite(tensor)
         checks.append(valid.all())
+    if activations:
+        # The infinity norm is finite exactly when every activation is finite.
+        # Multi-tensor reductions avoid three kernel launches per cache tensor;
+        # float64 regression target units keep their dtype throughout the check.
+        norms = [norm for group in activations.values() for norm in torch._foreach_norm(group, float("inf"))]
+        checks.append(torch.isfinite(torch.stack(norms)).all())
     # Only the final boolean crosses to the host, once per estimator group.
     return bool(torch.stack(checks).all()) if checks else True
 

@@ -11,6 +11,8 @@ LightPFN 1.5 non ha ancora una voce nella classifica ufficiale, e le sue misure 
 esecuzioni locali.
 
 - [Risultati della 1.5 (valutazioni locali)](#risultati-della-15-valutazioni-locali)
+  - [Run dei maintainer di TabArena sulla 1.5.0](#run-dei-maintainer-di-tabarena-sulla-150)
+  - [Velocità di inferenza della 1.5.1](#velocità-di-inferenza-della-151)
   - [Regola finale del secondo membro: verifica CPU fp32](#regola-finale-del-secondo-membro-verifica-cpu-fp32)
 - [Risultati della 1.1](#risultati-della-11)
   - [Insiemi di valutazione](#insiemi-di-valutazione)
@@ -61,6 +63,42 @@ su CPU fp32. CatBoost default ha RMSE 0,4794 e 0,3689 nei rispettivi protocolli;
 I quantili degli alberi su D3-reg usano la calibrazione dei residui su dati separati; D3-reg-L usa fit
 puntuali e Lite il bagging TabArena. I protocolli e le aggregazioni dei benchmark sono diversi.
 
+### Run dei maintainer di TabArena sulla 1.5.0
+
+I maintainer di TabArena hanno eseguito lightpfn 1.5.0 su tutti gli 816 split di TabArena-v0.1 (configurazione
+di default, bagging ufficiale a 8 fold con refit, RTX PRO 6000, torch 2.14.1) e hanno riportato il risultato nella
+[PR #719](https://github.com/autogluon/tabarena/pull/719); la voce non è ancora nella classifica pubblica.
+
+| Sottoinsieme | Posizione | Elo (IC 95%) | Voce ospitata di LightPFN 1.0 |
+|---|---:|---:|---:|
+| Tutti i task | 36 / 117 | 1426 (+49 / -56) | 1329, 59° (25,5% imputato) |
+| Binari | 35 / 115 | 1443 (+66 / -63) | 1415, 40° |
+| Multiclasse | 29 / 115 | 1550 (+126 / -88) | 1541, 31° |
+| Regressione | 53 / 112 | 1417 (+122 / -97) | non supportata |
+
+Tempo mediano di addestramento e di inferenza per 1.000 righe: 0,29 s e 0,019 s. LightPFN 1.5 è su entrambi i
+fronti di Pareto della classifica completa e sul fronte della regressione di Elo contro tempo di inferenza.
+
+### Velocità di inferenza della 1.5.1
+
+Stesso protocollo di TabArena senza il costo proprio di AutoGluon: per ogni task, otto modelli di fold senza
+cache (fit, predizione out-of-fold, salvataggio) e un refit in cache sulle righe di training del primo split
+(fit, predizione del test, salvataggio), tramite il wrapper TabArena, configurazione di default, due ripetizioni
+(mediana). Medie geometriche degli speedup:
+
+| Confronto, RTX 5090 | Task | Train | Predict | Fino a 3.000 righe: train / predict |
+|---|---:|---:|---:|---:|
+| 1.5.1 contro 1.1.0, classificazione | 31 | 1,65x | 1,64x | 1,40x / 1,25x (17 task) |
+| 1.5.1 contro 1.5.0 con le correzioni, classificazione | 31 | 1,17x | 1,03x | 1,32x / 1,05x |
+| 1.5.1 contro 1.5.0 con le correzioni, regressione | 8 | 1,42x | 1,03x | 1,51x / 1,03x (5 task) |
+| 1.5.1 contro 1.5.0 con le correzioni, classificazione, RX 7900 XT (ROCm) | 17 | 1,17x | 1,03x | 1,20x / 1,04x (14 task) |
+| 1.5.1 contro 1.5.0 con le correzioni, regressione, RX 7900 XT (ROCm) | 8 | 1,30x | 1,02x | 1,42x / 1,01x (5 task) |
+
+Le predizioni del refit sono bit-identiche alla 1.5.0 su tutti i task misurati. Le predizioni out-of-fold del
+passaggio unico differiscono per arrotondamento fp16: differenza massima di probabilità 8,3e-3, accordo
+dell'argmax almeno 99,8%, variazione media dell'AUC +5e-7 sui 31 task di classificazione; variazioni dell'RMSE
+out-of-fold sotto lo 0,02% in regressione.
+
 ### Regola finale del secondo membro: verifica CPU fp32
 
 Tutti i 23 task D3-reg (115 split) e i 15 D3-reg-L (30 split), quattro thread CPU. Variazione relativa di RMSE e
@@ -78,6 +116,18 @@ fp32 la vecchia regola basata sui target positivi per isolare il cambio di regol
 La soglia di asimmetria è stata scelta su questi task di sviluppo, quindi le stime sono ottimistiche. Sono
 esecuzioni locali di sviluppo, non risultati ufficiali di TabArena.
 [Riepilogo numerico CSV](../assets/v2_regression_quality.csv).
+
+
+Uno screen successivo del wrapper completo su RTX PRO 6000 include i fold serializzati e un refit in cache.
+Su otto task, la 1.5.0 rispetto alla 1.1.0 ottiene speedup geometrici di 1,31 volte in fit e 1,62 in predict.
+I run del maintainer sui 38 dataset di classificazione danno rispettivamente 1,14 e 1,59, dopo la mediana degli
+split per dataset. La mediana dei tempi di fit normalizzati sale da circa 0,26 a 0,30 secondi per 1.000 righe,
+mentre predict scende da 0,029 a 0,019: il fit delle tabelle piccole può essere più lento. Una media geometrica
+degli speedup non permette di scalare la mediana della classifica. Questi tempi sono distinti dallo screen
+precedente degli estimatori su RTX 5090. La fonte è il
+[rerun del maintainer](https://github.com/autogluon/tabarena/pull/719#issuecomment-6770068521) e le tabelle
+pubblicate per split.
+
 
 ## Risultati della 1.1
 

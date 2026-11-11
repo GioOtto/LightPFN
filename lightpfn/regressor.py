@@ -31,7 +31,7 @@ from lightpfn.sklearn import (
     _context_isfinite,
     _encode_frame,
     _fast_fp16,
-    _is_categorical,
+    _fit_categories,
     _is_frame,
     auto_categorical,
     resolve_device_was_auto,
@@ -66,7 +66,7 @@ def load_regression_model(path, device="cpu"):
 
 class V15Regressor:
     def __init__(self, model, device="cpu", max_context=50000, seed=0, query_rows=4096, chunk_cells="auto",
-                 n_estimators=2, precision="auto", log_skew=2.0):
+                 n_estimators=2, precision="auto", log_skew=2.0, cache_context=True):
         if getattr(model, "reg", None) is None or not isinstance(max_context, int) or max_context < 1:
             raise ValueError("a model with the quantiles head and a positive max_context are required")
         if not isinstance(query_rows, int) or query_rows < 1:
@@ -79,6 +79,9 @@ class V15Regressor:
         if log_skew is not None and (isinstance(log_skew, bool) or not isinstance(log_skew, (int, float))
                                      or np.isnan(log_skew)):
             raise ValueError("log_skew must be a number or None")
+        if not isinstance(cache_context, bool):
+            raise ValueError("cache_context must be a boolean")
+        self.cache_context = cache_context
         self.log_skew = log_skew
         self.n_estimators = n_estimators
         self.precision = precision
@@ -159,8 +162,7 @@ class V15Regressor:
         self.categories_ = {}
         self._frame_columns = X.columns.copy() if _is_frame(X) else None
         if _is_frame(X):
-            self.categories_ = {j: X.iloc[:, j].astype("category").cat.categories
-                                for j, dtype in enumerate(X.dtypes) if _is_categorical(dtype)}
+            self.categories_ = _fit_categories(X)
             X = _encode_frame(X, self.categories_).to_numpy(dtype=np.float32, copy=True)
         X, y = np.asarray(X, dtype=np.float32), np.asarray(y, dtype=np.float64)
         if X.ndim != 2 or X.shape[1] < 1 or y.shape != (len(X),) or not len(y) or not np.isfinite(y).all() or np.isinf(X).any():
@@ -174,6 +176,7 @@ class V15Regressor:
         self.n_precision_fallbacks_ = 0
         self.__dict__.pop("_fp16_net", None)
         self.__dict__.pop("ctx_", None)
+        self._uncached_data = None
         self.model.eval()
         # Adjusted Fisher-Pearson sample skewness, as pandas.Series.skew().
         centered = y - y.mean()
@@ -198,12 +201,22 @@ class V15Regressor:
             self.precision == "fp16" or self.precision == "auto" and _fast_fp16(self.fit_device_) and
             X.size >= FP16_MIN_CELLS) else "fp32"
         self.y_range_ = (float(y.min()), float(y.max()))
-        ys = [y] + ([] if self.second_ is None else [np.log(y) if self.second_ == "log" else -y])
-        tdev = self._tensor_device()
-        cat_t = (torch.as_tensor(self.cat_, device=tdev)[None].expand(self._members, -1)
-                 if self.cat_.any() else None)
-        Xt, yt = self._x(X), torch.as_tensor(np.stack(ys), device=tdev)
-        kw = dict(chunk_cells=self._chunk_cells(), cat=cat_t, regression=True)
+        ys = np.stack([y] + ([] if self.second_ is None else [np.log(y) if self.second_ == "log" else -y]))
+        if not getattr(self, "cache_context", True):
+            # Fold models need the context only once: keep the inputs, encode in predict (_uncached_blocks).
+            self._uncached_data = (X.copy(), ys)
+            return self
+        self.ctx_ = self._encode(X, ys)
+        return self
+
+    def _cat_tensor(self):
+        return (torch.as_tensor(self.cat_, device=self._tensor_device())[None].expand(self._members, -1)
+                if self.cat_.any() else None)
+
+    def _encode(self, X, ys):
+        """The encoded context of the (n, m) float32 inputs and the (members, n) targets of fit."""
+        Xt, yt = self._x(X), torch.as_tensor(ys, device=self._tensor_device())
+        kw = dict(chunk_cells=self._chunk_cells(), cat=self._cat_tensor(), regression=True)
         try:
             with self._autocast():
                 ctx = self._inference_net().encode(Xt, yt, **kw)
@@ -218,7 +231,8 @@ class V15Regressor:
             eng.scratch.clear()
             eng.finish()
             self._use_cpu(msg)
-            kw["chunk_cells"] = self._chunk_cells()
+            Xt, yt = Xt.cpu(), yt.cpu()
+            kw.update(chunk_cells=self._chunk_cells(), cat=self._cat_tensor())
             ctx = self._inference_net().encode(Xt, yt, **kw)
         if kind(self.fit_device_) == "vulkan":
             self._vk_net.eng.finish()
@@ -228,8 +242,7 @@ class V15Regressor:
                 with torch.autocast("cuda", enabled=False):
                     ctx = self.model.encode(Xt, yt, **kw)
             ctx = _fp32_cache(ctx)
-        self.ctx_ = ctx
-        return self
+        return ctx
 
     def _combine(self, q):
         """(members, M, 999) original-unit quantiles of the members -> (M, 999) of the ensemble."""
@@ -243,11 +256,43 @@ class V15Regressor:
             second = -second[:, ::-1]
         return np.sort((q[0] + second) / 2, axis=1)
 
+    def _one_pass(self, n, n_test, m):
+        """cache_context=False on CUDA/ROCm: encode and predict together when no piece would be chunked."""
+        cells = self._chunk_cells()
+        return (kind(self.fit_device_) == "cuda" and fuse_enabled("onepass") and 0 < n_test <= self.query_rows
+                and (cells is None or self._members * (n + n_test) * m <= cells))
+
+    def _uncached_blocks(self, X):
+        Xc, ys = self._uncached_data
+        Xq = self._x(X)
+        if not self._one_pass(len(Xc), Xq.shape[1], Xc.shape[1]):
+            # Larger tables: the cached path, with a context that lives only for this prediction.
+            self.ctx_ = self._encode(Xc, ys)
+            try:
+                yield from self._cached_blocks(Xq)
+            finally:
+                del self.ctx_
+            return
+        kw = dict(cat=self._cat_tensor())
+        Xt, yt = self._x(Xc), torch.as_tensor(ys, device=self._tensor_device())
+        with self._autocast():
+            q = self._inference_net().encode_predict_quantiles(Xt, yt, Xq, **kw)
+        if self.precision_ == "fp16" and not torch.isfinite(q).all():
+            self._precision_fallback("one-pass group")
+            with torch.autocast("cuda", enabled=False):
+                q = self.model.encode_predict_quantiles(Xt, yt, Xq, **kw)
+        yield self._combine(q.cpu().numpy())
+
     def _quantile_blocks(self, X):
         """Yield one NumPy query block, without retaining the preceding blocks."""
+        if getattr(self, "_uncached_data", None) is not None:
+            yield from self._uncached_blocks(X)
+            return
         if not hasattr(self, "ctx_"):
             raise ValueError("fit the regressor first")
-        Xt = self._x(X)
+        yield from self._cached_blocks(self._x(X))
+
+    def _cached_blocks(self, Xt):
         for i in range(0, Xt.shape[1], self.query_rows):
             query = Xt[:, i:i + self.query_rows]
             with self._autocast():
@@ -288,6 +333,8 @@ class LightPFNRegressor(RegressorMixin, BaseEstimator):
     to interpolate other levels in [0, 1]. predict integrates the quantile curve.
     precision="auto" follows the classifier policy on CUDA/ROCm; CPU and Vulkan use fp32.
     fold=True uses a folded inference network; False preserves the original CPU operations.
+    cache_context=False keeps the fit inputs and encodes them at each prediction, without storing the encoded
+    context (fold models predicted once); on CUDA/ROCm a small table is then encoded and predicted in one pass.
     device="auto" tries CUDA/ROCm, then Vulkan, then the CPU (LIGHTPFN_DEVICE overrides it), as the classifier.
     Vulkan supports marked categorical columns; category statistics, target normalization and quantile head
     readout stay on the host. A fit exceeding Vulkan buffer limits falls back to CPU with a warning under
@@ -297,7 +344,7 @@ class LightPFNRegressor(RegressorMixin, BaseEstimator):
     def __init__(self, model=None, checkpoint=None, device="auto", precision="auto", n_estimators=2,
                  max_context=50000, random_state=0, log_skew=2.0, query_rows=4096, chunk_cells="auto",
                  n_threads=None, repo_id=None, revision=None, cache_dir=None, local_files_only=False,
-                 fold=False):
+                 fold=False, cache_context=True):
         self.model = model
         self.checkpoint = checkpoint
         self.device = device
@@ -314,6 +361,7 @@ class LightPFNRegressor(RegressorMixin, BaseEstimator):
         self.cache_dir = cache_dir
         self.local_files_only = local_files_only
         self.fold = fold
+        self.cache_context = cache_context
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
@@ -366,7 +414,8 @@ class LightPFNRegressor(RegressorMixin, BaseEstimator):
         engine = V15Regressor(self.model_, device="auto" if resolve_device_was_auto(self.device) else self.device_,
                               max_context=self.max_context, seed=seed,
                               query_rows=self.query_rows, chunk_cells=self.chunk_cells,
-                              n_estimators=self.n_estimators, precision=self.precision, log_skew=self.log_skew)
+                              n_estimators=self.n_estimators, precision=self.precision, log_skew=self.log_skew,
+                              cache_context=self.cache_context)
         engine.fit(X, y, cat=cat)
         self.regressor_ = engine
         self.n_features_in_ = len(engine.cat_)
@@ -388,8 +437,10 @@ class LightPFNRegressor(RegressorMixin, BaseEstimator):
         engine = self.regressor_
         engine.model = self.model_
         engine.device = torch.device(device)
-        context = _fp32_cache(engine.ctx_) if kind(device) == "cpu" else engine.ctx_
-        engine.ctx_ = _to_device(context, device)
+        engine.device_ = engine.fit_device_ = device
+        if hasattr(engine, "ctx_"):  # cache_context=False keeps NumPy inputs instead
+            context = _fp32_cache(engine.ctx_) if kind(device) == "cpu" else engine.ctx_
+            engine.ctx_ = _to_device(context, device)
         engine.__dict__.pop("_fp16_net", None)
         if kind(device) == "cpu":
             engine.precision_ = "fp32"

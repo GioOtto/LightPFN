@@ -30,9 +30,11 @@ blocks. `predict_proba(X)` (or `predict` / `predict_quantiles` in regression) ru
 the network, in chunks, and attends to that cached context. A test row's prediction never depends on the other
 test rows.
 
-In `LightPFNClassifier`, this describes the default `cache_context=True`. With `cache_context=False`, `fit`
-stores owned input arrays; each prediction builds the same context and releases it afterwards. Predictions are
-unchanged.
+This describes the default `cache_context=True`. With `cache_context=False` (both estimators), `fit` stores
+owned input arrays; each prediction builds the same context and releases it afterwards. On CUDA/ROCm, when the
+training and test rows fit in one piece, that prediction encodes the context and predicts the test rows in a
+single pass that shares every row-wise operation between them (about half the GPU kernel launches): the same
+function up to float rounding. This suits fold models that predict once, as in bagging.
 
 In `LightPFNClassifier` with `n_estimators > 1`, the first estimator uses the original feature order and class
 slots and every further one a random feature permutation and a random assignment of classes to the model's label
@@ -105,7 +107,8 @@ LightPFNClassifier(model=None, checkpoint=None, device="auto", n_estimators=4, m
 ```python
 LightPFNRegressor(model=None, checkpoint=None, device="auto", precision="auto", n_estimators=2,
                   max_context=50000, random_state=0, log_skew=2.0, query_rows=4096, chunk_cells="auto",
-                  n_threads=None, repo_id=None, revision=None, cache_dir=None, local_files_only=False)
+                  n_threads=None, repo_id=None, revision=None, cache_dir=None, local_files_only=False,
+                  fold=False, cache_context=True)
 ```
 
 | Parameter | Default | Meaning |
@@ -119,6 +122,8 @@ LightPFNRegressor(model=None, checkpoint=None, device="auto", precision="auto", 
 | `query_rows` | `4096` | test rows per prediction chunk |
 | `chunk_cells` | `"auto"` | cells per frontend piece |
 | `n_threads` | `None` | PyTorch CPU threads (process-wide `torch.set_num_threads`); `None` keeps PyTorch's setting |
+| `cache_context` | `True` | keep the encoded context between predictions; `False` stores the inputs and encodes at each prediction (one pass on CUDA/ROCm for small tables), useful for fold models predicted only once |
+| `fold` | `False` | use the folded inference network (same function up to rounding) |
 | `checkpoint`, `model`, `repo_id`, `revision`, `cache_dir`, `local_files_only` | `None` / `False` | local checkpoint, custom `LightPFN` module, or Hugging Face download options |
 
 Both constructors store their parameters and do nothing else, so `clone`, `get_params` and `set_params` work as
@@ -255,13 +260,26 @@ Both estimators accept `precision="auto"`, `"fp32"` or `"fp16"`:
 - `precision_` records the policy chosen during `fit`; changing `precision` via `set_params` takes effect on the
   next `fit`.
 
+The 1.5.1 attention-scale MLP uses ordinary 2D GEMMs during reduced-precision GPU inference. This removes
+an fp16 strided-batched cuBLAS call reported failing with torch 2.15/CUDA 13.2 and driver 580.178
+([maintainer report](https://github.com/autogluon/tabarena/pull/719#issuecomment-6770068521)). CUDA exceptions
+still propagate: the non-finite retry does not recover an illegal memory access. If a CUDA failure occurs,
+restart the process before trying `precision="fp32"` or torch 2.14.1/CUDA 13.0. Container compatibility
+libraries can load a different `libcuda` from the host version shown by `nvidia-smi`; record both when
+diagnosing a problem. The original failure did not reproduce on an RTX 5090 or an RTX PRO 6000 with the same
+driver (580.178.04, native and compatibility `libcuda`) and torch 2.15/CUDA 13.2, with either the 1.5.0 or the
+1.5.1 code, on the 30 anneal splits of the report.
+
 ## Speed
 
 Measured fit plus predict times are in [RESULTS.md](RESULTS.md#cost). In practice:
 
 - A GPU is much faster: on an RX 7900 XT, Vulkan and ROCm are 6 to 10 times faster than a 16-thread desktop CPU
-  for 1.1; in 1.5 on an RTX 5090, `precision="auto"` (fp16) and fused layers are about 1.9x to 2.0x faster than
-  1.1.0 across the 8-fold x 4-member protocol.
+  for 1.1. With the TabArena protocol (eight uncached fold models, then a cached refit), 1.5.1 trains 1.65x and
+  predicts 1.64x faster than 1.1.0 on an RTX 5090 (geometric means over 31 classification tasks; 1.40x and
+  1.25x on the 17 tables up to 3,000 rows). Small tables are bound by kernel launches, not by GPU work.
+- For bagging or cross-validation, fit the fold models with `cache_context=False`: each one predicts its
+  validation rows in a single pass.
 - On CPU, `n_estimators=1` is about four times faster than 4 in classification (and twice as fast as 2 in
   regression) and loses little accuracy.
 - Set `n_threads` to the number of physical cores; hyper-threads and efficiency cores help little.
@@ -300,6 +318,10 @@ Setting the environment variable `LIGHTPFN_WEIGHTS_DIR=weights` directs `load_pr
 
 `load_model(path)` reads safetensors with their JSON config, or PyTorch `.pt` files through
 `torch.load(weights_only=True)`. Checkpoints that need arbitrary pickled objects are rejected on purpose.
+
+A missing `classifier/` or `regressor/` folder at a modern revision raises the download/cache error,
+including offline with an incomplete cache. The loader never substitutes the old root classifier there.
+The explicitly pinned historical 1.0/1.1 revisions retain their root layout.
 
 ## Reproducibility
 

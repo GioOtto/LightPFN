@@ -10,6 +10,8 @@ the [report of 1.1](../../paper/LightPFN_report.pdf). The official TabArena lead
 leaderboard entry yet, and its measurements below are local runs.
 
 - [Results of 1.5 (local evaluations)](#results-of-15-local-evaluations)
+  - [TabArena maintainer run of 1.5.0](#tabarena-maintainer-run-of-150)
+  - [Inference speed of 1.5.1](#inference-speed-of-151)
   - [Final second-member rule: CPU fp32 check](#final-second-member-rule-cpu-fp32-check)
 - [Results of 1.1](#results-of-11)
   - [Evaluation sets](#evaluation-sets)
@@ -59,6 +61,40 @@ ratio is 0.972 (8/13 wins), while larger Kumo-Tabular-Small and TabICLv2 beat Li
 D3-reg tree quantiles use held-out residual calibration; D3-reg-L uses point fits, and Lite uses TabArena
 bagging. The benchmark protocols and aggregations differ.
 
+### TabArena maintainer run of 1.5.0
+
+The TabArena maintainers ran lightpfn 1.5.0 on all 816 splits of TabArena-v0.1 (default configuration, official
+8-fold bagging with refit, RTX PRO 6000, torch 2.14.1) and reported the result in
+[PR #719](https://github.com/autogluon/tabarena/pull/719); the entry is not on the public leaderboard yet.
+
+| Subset | Position | Elo (95% CI) | LightPFN 1.0 hosted entry |
+|---|---:|---:|---:|
+| All tasks | 36 / 117 | 1426 (+49 / -56) | 1329, 59th (25.5% imputed) |
+| Binary | 35 / 115 | 1443 (+66 / -63) | 1415, 40th |
+| Multiclass | 29 / 115 | 1550 (+126 / -88) | 1541, 31st |
+| Regression | 53 / 112 | 1417 (+122 / -97) | not supported |
+
+Median train and inference time per 1,000 rows: 0.29 s and 0.019 s. LightPFN 1.5 is on both Pareto fronts of
+the full leaderboard and on the regression front of Elo against inference time.
+
+### Inference speed of 1.5.1
+
+Same protocol as TabArena without AutoGluon's own overhead: for each task, eight uncached fold models (fit,
+out-of-fold prediction, save) and a cached refit on the first split's training rows (fit, test prediction, save),
+through the TabArena wrapper, default configuration, two repeats (median). Geometric means of the speedups:
+
+| Comparison, RTX 5090 | Tasks | Train | Predict | Up to 3,000 rows: train / predict |
+|---|---:|---:|---:|---:|
+| 1.5.1 against 1.1.0, classification | 31 | 1.65x | 1.64x | 1.40x / 1.25x (17 tasks) |
+| 1.5.1 against 1.5.0 with the fixes, classification | 31 | 1.17x | 1.03x | 1.32x / 1.05x |
+| 1.5.1 against 1.5.0 with the fixes, regression | 8 | 1.42x | 1.03x | 1.51x / 1.03x (5 tasks) |
+| 1.5.1 against 1.5.0 with the fixes, classification, RX 7900 XT (ROCm) | 17 | 1.17x | 1.03x | 1.20x / 1.04x (14 tasks) |
+| 1.5.1 against 1.5.0 with the fixes, regression, RX 7900 XT (ROCm) | 8 | 1.30x | 1.02x | 1.42x / 1.01x (5 tasks) |
+
+The refit predictions are bit-identical to 1.5.0 on every timed task. The out-of-fold predictions of the
+one-pass path differ by fp16 rounding: largest probability difference 8.3e-3, argmax agreement at least 99.8%,
+mean AUC change +5e-7 over the 31 classification tasks; out-of-fold RMSE changes below 0.02% in regression.
+
 ### Final second-member rule: CPU fp32 check
 
 All 23 D3-reg tasks (115 splits) and all 15 D3-reg-L tasks (30 splits), four CPU threads. Relative change in
@@ -75,6 +111,17 @@ reruns its old positive-target rule in fp32 to isolate the rule change.
 
 The skewness threshold was selected on these development tasks, so the estimates are optimistic. These are local
 development runs, not official TabArena results. [Numerical summary CSV](../assets/v2_regression_quality.csv).
+
+
+A later complete-wrapper screen on RTX PRO 6000 includes serialized fold models and a cached refit. Over
+eight tasks, 1.5.0 versus 1.1.0 gives geometric speedups of 1.31x in fit and 1.62x in predict. The maintainer
+runs on all 38 classification datasets give 1.14x and 1.59x, respectively, after taking each dataset's median
+over splits. Their median normalized fit time rises from about 0.26 to 0.30 seconds per 1,000 rows while
+prediction falls from 0.029 to 0.019: small-table fits can be slower. A geometric mean of speedups cannot be
+used to scale a leaderboard median. These timings are separate from the earlier RTX 5090 estimator screen.
+The source is the [maintainer rerun](https://github.com/autogluon/tabarena/pull/719#issuecomment-6770068521)
+and its hosted per-split tables.
+
 
 ## Results of 1.1
 

@@ -103,3 +103,29 @@ def test_dataframe_categories_and_pipeline():
     assert np.isfinite(r.predict(query)).all()
     pipe = make_pipeline(StandardScaler(), LightPFNRegressor(model=network(), device='cpu'))
     assert pipe.fit(x, y).predict(x[:3]).shape == (3,)
+
+
+def test_to_cpu_updates_all_device_metadata():
+    x, y = task()
+    r = LightPFNRegressor(model=network(), device='cpu').fit(x, y)
+    expected = r.predict(x[:3])
+    # Reproduce stale CUDA fit metadata without requiring a GPU for this contract.
+    r.regressor_.fit_device_ = 'cuda:0'
+    r.to('cpu')
+    assert r.regressor_.fit_device_ == r.regressor_.device_ == r.device_ == 'cpu'
+    np.testing.assert_array_equal(expected, r.predict(x[:3]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA/ROCm unavailable')
+@pytest.mark.parametrize('precision', ['fp32', 'fp16'])
+def test_cuda_cpu_cuda_round_trip(precision):
+    x, y = task()
+    r = LightPFNRegressor(model=network(), device='cuda', precision=precision).fit(x, y)
+    before = r.predict(x[:3])
+    r.to('cpu')
+    assert str(r.regressor_._tensor_device()) == 'cpu'
+    cpu = r.predict(x[:3])
+    r.to('cuda')
+    after = r.predict(x[:3])
+    assert np.isfinite(cpu).all() and np.isfinite(after).all()
+    np.testing.assert_allclose(before, after, rtol=1e-3, atol=1e-3)

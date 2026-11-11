@@ -2,6 +2,41 @@
 
 All notable changes to this project are listed here. Versions follow [semantic versioning](https://semver.org/).
 
+## 1.5.1 (2026-11-11)
+
+Inference fixes and faster GPU inference, with the same weights, architecture and Hugging Face revision as 1.5.0.
+Cached predictions are unchanged (bit-identical on the 31 TabArena classification and 8 regression tasks we
+timed); one-pass predictions match up to float rounding.
+
+- One-pass inference for `cache_context=False` on CUDA/ROCm: when the training and test rows fit in one piece,
+  the context is encoded and the test rows predicted in a single pass that shares every row-wise operation
+  (`LightPFN.encode_predict_logits`, `encode_predict_quantiles`). About half the GPU kernel launches of the
+  fold models in bagging. `LIGHTPFN_FUSE_DISABLE=onepass` restores the two-step path.
+- `LightPFNRegressor(cache_context=False)`, as in the classifier: the fit keeps its inputs and each prediction
+  encodes them, for fold models predicted once.
+- The fp16 weight view now covers every projection that inference autocast runs in fp16 (cell embedding,
+  categorical adapter, attention-scale MLPs), so autocast no longer casts their weights at every call.
+  Bit-identical to 1.5.0 in fp16.
+- DataFrame conversion and `cat="auto"` detection work on whole dtype blocks and on category codes instead of
+  one pandas call per column (2-3x less host time in `fit` on tables with many categorical columns).
+  Identical outputs.
+- With the TabArena protocol on an RTX 5090, training is 1.17x faster than 1.5.0 with the fixes above on 31 classification tasks
+  (1.32x on tables up to 3,000 rows) and 1.42x on 8 regression tasks; prediction 1.03x. Against 1.1.0:
+  1.65x training and 1.64x prediction in classification.
+- Evaluate the reduced-precision attention-scale MLP with 2D GEMMs on CUDA/ROCm. This removes the fp16
+  strided-batched cuBLAS operation reported failing on a torch 2.15/CUDA 13.2 stack. CPU, fp32 and training
+  keep their existing computation. This does not suppress CUDA exceptions or promise recovery from a
+  damaged CUDA context.
+- Avoid pandas `dropna()` allocations while detecting categorical NumPy-backed numeric columns; nullable
+  extension columns retain their existing handling.
+- Batch the GPU activation checks with infinity-norm reductions, preserving metadata padding and float64
+  target units. The check transfers a single boolean to the host.
+- `LightPFNRegressor.to()` updates the fitted engine's device metadata as well as its tensors, fixing
+  GPU-to-CPU inference and subsequent device moves.
+- Missing modern model subfolders now raise the original download/cache error. Root-level classification
+  weights are loaded only for an explicitly requested historical 1.0/1.1 revision, preventing a partial
+  offline cache from selecting old weights silently.
+
 ## 1.5.0 (2026-11-10)
 
 Update of LightPFN with regression, native categorical columns, wide tables and faster GPU inference. Same

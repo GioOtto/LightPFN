@@ -1,6 +1,6 @@
 """LightPFN: compact tabular inference, pretrained only on synthetic data."""
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 __all__ = ["Config", "LightPFN", "LightPFNClassifier", "LightPFNRegressor", "load_model", "load_pretrained", "save_model", "__version__"]
 
 

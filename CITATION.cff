@@ -8,7 +8,7 @@ authors:
 license: Apache-2.0
 repository-code: "https://github.com/GioOtto/LightPFN"
 url: "https://github.com/GioOtto/LightPFN"
-version: 1.5.0
+version: 1.5.1
 date-released: "2026-11-09"
 keywords:
   - tabular data

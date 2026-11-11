@@ -126,7 +126,17 @@ class SoftmaxScaling(nn.Module):
                     cache.popitem(last=False)
         if cached:
             cache.move_to_end(key)
-        return q * base * (1 + torch.tanh(self.mod(q)))
+        if (not self.training and not torch.is_grad_enabled() and q.device.type == "cuda"
+                and q.dtype in (torch.float16, torch.bfloat16)):
+            # Attention splits a contiguous (B, L, H*D) projection into (B, H, L, D).
+            # Restore its physical row order for two ordinary 2D GEMMs. This avoids
+            # the fp16 strided-batched cuBLAS path that failed on torch 2.15/cu132,
+            # without copying the usual interleaved-head input or changing weights.
+            b, h, length, d = q.shape
+            modulation = self.mod(q.transpose(1, 2).reshape(-1, d)).view(b, length, h, d).transpose(1, 2)
+        else:
+            modulation = self.mod(q)
+        return q * base * (1 + torch.tanh(modulation))
 
 
 # CUDA attention kernels put the batch on a grid dimension of at most 65535 blocks: a larger batch fails
@@ -258,6 +268,23 @@ class Block(nn.Module):
 
     def _forward(self, x, k, v, mask=None, q_rope=None, kv_heads=None):
         x = x + self.attn.attend(self.norm_q(x), k, v, mask, q_rope, kv_heads)
+        return x + self.mlp(self.norm_ff(x))
+
+    def forward_split(self, x, split, k, v, kv_heads):
+        """Inference: forward(x[:, :split], k, v) and forward(x[:, split:], k, v, kv_heads=kv_heads) in one
+        call. Both parts share the norms, projections and MLP; only the two attention calls differ."""
+        a = self.attn
+        q = a.split(a.q(self.norm_q(x)))
+        if hasattr(a, "q_norm"):
+            q = a.q_norm(q)
+        if a.scaling is not None:
+            q = a.scaling(q, k.shape[2])
+        r = a.n_heads // kv_heads
+        o = torch.cat([sdpa(q[:, :, :split], k, v),
+                       sdpa(q[:, :, split:], k[:, :kv_heads].repeat_interleave(r, dim=1),
+                            v[:, :kv_heads].repeat_interleave(r, dim=1))], 2)
+        B, H, L, D = o.shape
+        x = x + a.out(o.transpose(1, 2).reshape(B, L, H * D))
         return x + self.mlp(self.norm_ff(x))
 
 

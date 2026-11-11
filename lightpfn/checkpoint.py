@@ -119,12 +119,19 @@ def load_pretrained(*, repo_id=None, revision=None, device="cpu", cache_dir=None
         from huggingface_hub.utils import EntryNotFoundError
     except ImportError:  # pragma: no cover - very old huggingface-hub
         EntryNotFoundError = FileNotFoundError
-    # 1.5 and later keep each model in its own subfolder; 1.0/1.1 revisions (e.g. bd389ab5, tag v1.1.0) hold one
-    # classifier at the root, so a classifier falls back to the root when the subfolder is missing.
+    # Only explicitly selected legacy revisions may use root weights. A missing
+    # modern subfolder (including a partial offline cache) must never select the
+    # old classifier that remains at the root of the same snapshot.
+    legacy = repo_id == spec["repo_id"] and (
+        revision in ("v1.0.0", "v1.1.0") or
+        len(revision) >= 8 and "bd389ab59a89dd0e05c9ecb7c642c08ee52e9637".startswith(revision)
+    )
     root = False
     try:
         config_path = Path(hf_hub_download(filename="config.json", subfolder=task, **options))
     except (EntryNotFoundError, FileNotFoundError):
+        if not legacy:
+            raise
         if task == "regressor":
             raise ValueError(f"Revision {revision!r} has no regression weights (1.0/1.1 revisions are classifier only).")
         root = True
