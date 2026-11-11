@@ -46,7 +46,7 @@
 \pagestyle{fancy}
 \fancyhf{}
 \fancyhead[L]{\small\scshape LightPFN 1.5}
-\fancyhead[R]{\small\scshape Technical report, version 1.0, November 2026}
+\fancyhead[R]{\small\scshape Technical report, version 1.1, November 2026}
 \fancyfoot[C]{\small\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 \fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\small\thepage}\renewcommand{\headrulewidth}{0pt}}
@@ -70,7 +70,7 @@
 \vspace{6pt}
 \rule{\linewidth}{0.6pt}\\[10pt]
 {\large Giorgio Ottoboni}\\[3pt]
-{\small Technical report, version 1.0, 10 November 2026}\\[2pt]
+{\small Technical report, version 1.1, 11 November 2026}\\[2pt]
 {\small\url{https://github.com/GioOtto/LightPFN}}
 \end{center}
 \vspace{4pt}
@@ -84,7 +84,8 @@ At the end of long-context pretraining (single estimator), the classifier preser
 A final 8,500-step fine-tuning on synthetic tables with 64 to 500 features, beyond the 100-feature limit of pretraining, improves the nine D3 datasets with more than 100 features (log loss $-0.048$ $[-0.108,-0.004]$) without measurable cost elsewhere (single-estimator D3 0.9102, Dcat 10k 0.7082), and raises the author-run TabArena-Lite classification Elo from 1416 to 1436 on the same RTX~5090 (1.1: 1423; the intervals overlap). % runs/cls_wide_20261109/PROTOCOL.md, eval/ft8500_compare.txt, eval/abs_n1_n4.txt, lite_box/
 In regression, two-member inference ($y$ and $\log y$ or $-y$, up to 50,000 context rows) reaches 0.1748 normalized CRPS and 0.4042 normalized RMSE on the 23-task D3-reg benchmark (beating default CatBoost on 22 of 23 tasks) and reaches a local TabArena-Lite regression Elo of 1450 (vs.\ 1416 for default CatBoost, 1217 for LightGBM, and 1183 for XGBoost), though a substantial gap remains to larger foundation models. % runs/analysis_reg_inference_20261109/RESULTS.md, runs/release_v2/lite_final_20261109/
 Compiler-free half-precision GPU inference with silent per-block FP32 fallback, shared weight views, and inference caches improves the geometric-mean classification training and prediction times by $1.89\times$ and $2.04\times$ relative to 1.1.0 on eight tasks under an 8-fold, 4-estimator protocol on the same RTX~5090. Prediction differences are small but nonzero. % runs/analysis_speed_20261109_cuda/tabarena_pkg2_cuda/real_comparison.csv
-Code and weights are released under the Apache~2.0 license as the \texttt{lightpfn} 1.5.0 package.
+On the official TabArena leaderboard, where the maintainers ran \texttt{lightpfn} 1.5.1 on all 816 splits of the 51 datasets, LightPFN is 31st of 99 entries with Elo 1447 ($+53/-61$), above every tree-based entry including tuned and ensembled ones (intervals overlap), 28th of 103 in classification (1468) and 47th of 101 in regression (1431; default CatBoost 1410), and lies on the Pareto fronts of Elo against median training and prediction time. % runs/tabarena_official/leaderboard_20261111/
+Code and weights are released under the Apache~2.0 license as the \texttt{lightpfn} 1.5 package (1.5.0, and 1.5.1 with inference fixes and faster GPU inference on the same weights).
 \end{abstract}
 
 % ======================================================================
@@ -421,7 +422,7 @@ We emphasize that these numbers are \textbf{local, unverified TabArena-Lite esti
 \item On the 38 classification tasks (Table~\ref{tab:lite}, top block), the final classifier completes all tasks with no failure or imputation and reaches a local Lite Elo of \textbf{1436} ($+74/-65$, 34th of 115 entries, mean rank 46.84) on an RTX~5090. The \texttt{cls\_long} 15k checkpoint, run with the same class on the same GPU, scored 1416 ($+72/-66$, 35th; 1415 on the RX~7900~XT); the final classifier has lower error on 24 tasks and higher on 14. Both are level with LightPFN~1.1 on the same split (1423, $+69/-70$, in the comparison of the final classifier; the intervals overlap) and above every tree-based entry, including tuned CatBoost (1387) and default CatBoost (1341). This matches the development-set picture: on ordinary tables 1.5 equals 1.1, and its gains are on high-cardinality categorical columns, which are rare in TabArena. % runs/cls_wide_20261109/lite_box/lite_{A,B}/classification/website_leaderboard.csv
 \item Median times were $0.29$/$0.023$~s per 1k rows (training/prediction) for the final classifier on the RTX~5090 ($0.29$/$0.024$ for the \texttt{cls\_long} checkpoint on the same GPU, $0.31$/$0.041$ on the RX~7900~XT), with other CPU jobs running on the machine; they are not comparable with the official timings of 1.1, which come from the maintainers' hardware (Section~\ref{sec:speed} compares both versions on the same GPU). % runs/release_v2/lite_final_20261109/eval/classification/website_leaderboard.csv
 \item Figure~\ref{fig:pareto} places these results against training time. In both local comparisons LightPFN~1.5 lies on the Pareto front of Elo against median training time per 1k rows, and in regression its training time is the lowest of all 111 entries. Its timings come from the author's GPU and the others from the hosted runs on other hardware, so this is an indication, not a verified position.
-\item Official full-leaderboard evaluation of LightPFN~1.5 across all splits of the 51 TabArena datasets will be added in a later version of this report once the maintainers' run completes: no official 1.5 Elo, rank, or timing is claimed here.
+\item The official evaluation by the TabArena maintainers on all splits of the 51 datasets is reported in Section~\ref{sec:official}; the local numbers above are first-split estimates on other hardware.
 \end{itemize}
 
 \begin{table}[tbp]
@@ -509,6 +510,43 @@ Following this analysis, the released regressor uses $\log(y)$ only when $\min(y
 \end{enumerate}
 
 % ======================================================================
+\section{Official TabArena Leaderboard}
+\label{sec:official}
+
+The TabArena maintainers ran \texttt{lightpfn} 1.5.1 (the released weights with the inference fixes and speedups of Section~\ref{sec:speed}) on all 816 splits of TabArena-v0.1 \cite{tabarena}: 38 classification and 13 regression datasets, official 8-fold bagging with refit, default configuration (four classification estimators, two regression members, no search space), one RTX~PRO~6000 GPU. The result is verified, nothing is imputed, and it replaced the LightPFN~1.1 entry on 11 November 2026 (Space data commit \texttt{e0723ee}). Table~\ref{tab:official} lists the views with imputed entries excluded. % runs/tabarena_official/leaderboard_20261111/
+\begin{table}[tbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrrr}
+\toprule
+View (all splits) & Datasets & Position & Elo (95\% CI) & Train / predict (s per 1k) & Default CatBoost \\
+\midrule
+\textbf{All tasks} & 51 & \textbf{31 / 99} & \textbf{1447} ($+53/-61$) & 0.23 / 0.019 & 43rd, 1383 \\
+All tasks, Lite (first split) & 51 & 30 / 99 & 1433 ($+54/-58$) & 0.24 / 0.019 & 45th, 1358 \\
+\textbf{Classification} & 38 & \textbf{28 / 103} & \textbf{1468} ($+63/-62$) & 0.24 / 0.019 & 41st, 1388 \\
+\quad Binary & 30 & 29 / 103 & 1451 ($+67/-62$) & 0.19 / 0.014 & 36th, 1408 \\
+\quad Multiclass & 8 & 25 / 103 & 1559 ($+146/-98$) & 0.37 / 0.024 & 59th, 1326 \\
+\textbf{Regression} & 13 & \textbf{47 / 101} & \textbf{1431} ($+129/-99$) & 0.16 / 0.024 & 51st, 1410 \\
+All tasks, small datasets & & 27 / 99 & 1462 ($+73/-60$) & 0.29 / 0.024 & 49th, 1323 \\
+All tasks, medium datasets & & 49 / 99 & 1446 ($+116/-116$) & 0.08 / 0.015 & 32nd, 1584 \\
+\bottomrule
+\end{tabular}
+\caption{Official TabArena leaderboard of 11 November 2026, LightPFN~1.5.1, imputed entries excluded. Elo is computed among the entries of each view and is not comparable across rows. Times are the leaderboard medians per 1,000 rows. With imputed entries included (the default view of the page), LightPFN is 31st of 110 with Elo 1426 ($+49/-55$).}
+\label{tab:official}
+\end{table}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.9\linewidth]{figures2/official_pareto15.pdf}
+\caption{Official TabArena leaderboard of 11 November 2026, all 51 datasets, all splits, imputed entries excluded: Elo against median training time per 1,000 rows (log scale, tuned entries include their search time). Blue: LightPFN~1.5.1; orange: tree-based entries; grey: other entries; dashed: Pareto front. GPU methods were timed on a GPU and tree-based methods on a CPU.}
+\label{fig:official-pareto}
+\end{figure}
+
+Over all 51 datasets and in classification, the Elo point estimate of LightPFN~1.5.1 is above every tree-based entry, including tuned and ensembled LightGBM (1434 over all datasets) and CatBoost (1424); the intervals overlap those of the tuned gradient-boosting entries and of default CatBoost, so against them this is not a clear win, while default XGBoost (1214) and LightGBM (1189) are more than 200 points lower with separate intervals. In regression, which LightPFN did not support before 1.5, it is above default CatBoost (1410, overlapping intervals) and below the tuned gradient-boosting entries (1442 to 1522); the larger foundation models are far ahead (Kumo-Tabular-Small 2130, Seldon-Mini 2150, TabICLv2 1712), in line with Section~\ref{sec:reg-gap}. As with 1.1, the weak spot is the medium datasets (49th of 99, default CatBoost 32nd).
+LightPFN is on the Pareto front of Elo against median training time in every view of Table~\ref{tab:official} and against median prediction time in every view except the medium datasets (Figure~\ref{fig:official-pareto}): over all tasks only KNN trains faster and only EBM predicts faster, both with much lower Elo, and in regression its training time is the lowest of all 101 entries. On the same hardware the maintainers measured 0.290 and 0.019~s per 1,000 rows for 1.5.0 against 0.235 and 0.019~s for 1.5.1 over all tasks, with the same Elo.
+
+% ======================================================================
 \section{Inference Speed}
 \label{sec:speed}
 
@@ -575,16 +613,15 @@ Model capacity ($\sim4.8\text{M}$ vs.\ $27.5\text{M}$ parameters) and prior cove
 While key prior comparisons (the 6-arm class-share/graph-v4 test in Section~\ref{sec:classeq}, the regression head pilot, and the \texttt{r2} regression prior A/B test in Section~\ref{sec:r2-prior}) included two-seed comparisons (the class-share contrast itself used one seed), the 8,000-step lookup ablation, the 30,000-step B4 vs.\ A3 gate, and the final 135,000-step classification and 44,063-step regression runs were executed with a single training seed due to compute budget constraints.
 \item \textbf{Inference choices selected on development sets.}
 The regression second-member rule and the FP16 cell threshold were chosen on the same development tasks used to report their effect (D3-reg, D3-reg-L, and the eight speed tasks), so those gains are optimistic estimates. D1/D2/D3/Dcat/Scale/D4 were repeatedly consulted during development; their confidence intervals condition on the trained checkpoint and do not measure training-seed variability. Intervals over the 12 Dcat cells treat two sizes from the same dataset as separate cells and can be optimistic.
-\item \textbf{No official TabArena results for 1.5 yet.}
-All TabArena numbers in Table~\ref{tab:lite} are local TabArena-Lite runs (first split of each dataset) on the author's workstation.
-Official verified results across all repeats and splits will be added in a later version of this report, after the maintainers have evaluated the TabArena update; this version gives no official 1.5 values.
+\item \textbf{One official benchmark, wide intervals.}
+The official TabArena results (Section~\ref{sec:official}) cover all splits, but their Elo intervals overlap those of tuned gradient boosting and default CatBoost, and the 13 regression and the medium datasets give wide intervals. The numbers in Table~\ref{tab:lite} are local TabArena-Lite runs (first split of each dataset) on the author's hardware.
 \end{enumerate}
 
 % ======================================================================
 \section{Availability, Licensing and Reproducibility}
 \label{sec:licensing}
 
-LightPFN~1.5 code and pretrained weights (classification checkpoint \texttt{cls\_wide/ema\_step008500.pt} and regression checkpoint \texttt{reg\_long/ema\_step005000.pt}) are released under the \textbf{Apache~2.0 license}: the package \texttt{lightpfn} 1.5.0 on PyPI (\texttt{pip install lightpfn}), the code at \url{https://github.com/GioOtto/LightPFN} (tag \texttt{v1.5.0}), and the weights in the \texttt{classifier/} and \texttt{regressor/} folders of the Hugging Face repository \url{https://huggingface.co/ueuegio/LightPFN}, loaded at an immutable revision recorded in the package. The 1.1 weights remain at their original pinned revision.
+LightPFN~1.5 code and pretrained weights (classification checkpoint \texttt{cls\_wide/ema\_step008500.pt} and regression checkpoint \texttt{reg\_long/ema\_step005000.pt}) are released under the \textbf{Apache~2.0 license}: the package \texttt{lightpfn} 1.5.1 on PyPI (\texttt{pip install lightpfn}; 1.5.0 has the same weights), the code at \url{https://github.com/GioOtto/LightPFN} (tag \texttt{v1.5.1}), and the weights in the \texttt{classifier/} and \texttt{regressor/} folders of the Hugging Face repository \url{https://huggingface.co/ueuegio/LightPFN}, loaded at an immutable revision recorded in the package. The 1.1 weights remain at their original pinned revision.
 Both checkpoints are pretrained exclusively on synthetic tasks generated by the SCM graph and rule generators, with the \texttt{r2} observation recipe for regression.
 No pretrained weights, predictions, logits, or generated datasets from another tabular foundation model (such as TabPFN, TabICL, Kumo-Tabular, Seldon, LimiX, Mitra, or EXAONE) were used at any point in training or data generation; external pretrained models were used strictly as evaluation baselines. Synthetic generator code imports the TabICL \cite{qu2025} prior implementation, which is not included in the inference wheel; this is code reuse, not use of pretrained-model outputs. % lightpfn/prior/generate.py, runs/release_v2/evidence/refresh_vulkan/artifacts.json
 The PyPI wheel contains inference code only and has the following direct dependencies (\texttt{torch}, \texttt{numpy}, \texttt{scikit-learn}, \texttt{huggingface-hub}, \texttt{safetensors}, and optionally \texttt{wgpu} for Vulkan).

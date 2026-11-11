@@ -2,16 +2,16 @@
 
 [English](../en/RESULTS.md) · **Italiano**
 
-Questa pagina riporta i risultati delle valutazioni locali di LightPFN 1.5 e i risultati completi di benchmark
-di LightPFN 1.1. Protocolli e ablation sono descritti nel
+Questa pagina riporta i risultati di LightPFN 1.5 (classifica ufficiale di TabArena e valutazioni locali) e i
+risultati completi di benchmark di LightPFN 1.1. Protocolli e ablation sono descritti nel
 [report tecnico di LightPFN 1.5](https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN15_report.pdf) e
-nel [report della 1.1](../../paper/LightPFN_report.pdf) (in inglese). La voce nella classifica ufficiale di
-TabArena è LightPFN 1.1 (il checkpoint a contesto lungo LC39k nel report della 1.1, 4.603.088 parametri);
-LightPFN 1.5 non ha ancora una voce nella classifica ufficiale, e le sue misure riportate qui sotto sono
-esecuzioni locali.
+nel [report della 1.1](../../paper/LightPFN_report.pdf) (in inglese). Dall'11 novembre 2026 la voce nella
+classifica ufficiale di TabArena è LightPFN 1.5.1, eseguita dai maintainer su tutti i 51 dataset; sostituisce la
+voce di LightPFN 1.1 (il checkpoint a contesto lungo LC39k nel report della 1.1, 4.603.088 parametri, solo
+classificazione). Le altre misure della 1.5 riportate qui sotto sono esecuzioni locali.
 
+- [TabArena, classifica ufficiale della 1.5.1](#tabarena-classifica-ufficiale-della-151)
 - [Risultati della 1.5 (valutazioni locali)](#risultati-della-15-valutazioni-locali)
-  - [Run dei maintainer di TabArena sulla 1.5.0](#run-dei-maintainer-di-tabarena-sulla-150)
   - [Velocità di inferenza della 1.5.1](#velocità-di-inferenza-della-151)
   - [Regola finale del secondo membro: verifica CPU fp32](#regola-finale-del-secondo-membro-verifica-cpu-fp32)
 - [Risultati della 1.1](#risultati-della-11)
@@ -23,12 +23,84 @@ esecuzioni locali.
   - [Costo](#costo)
   - [Feature categoriche: cosa non ha funzionato](#feature-categoriche-cosa-non-ha-funzionato)
 
+## TabArena, classifica ufficiale della 1.5.1
+
+Classifica dell'11 novembre 2026 ([Space di TabArena](https://huggingface.co/spaces/TabArena/leaderboard),
+commit dei dati `e0723ee`). I maintainer di TabArena hanno eseguito **lightpfn 1.5.1** su tutti gli 816 split di
+TabArena-v0.1 con il protocollo ufficiale (bagging a otto fold con refit, validazione `8x1`) nella
+configurazione di default: quattro stimatori in classificazione o due membri in regressione, nessuno spazio di
+ricerca, RTX PRO 6000. Hanno segnato il risultato come verificato; nulla è imputato
+([PR #719](https://github.com/autogluon/tabarena/pull/719)). Viste con i modelli imputati esclusi:
+
+| Vista (LightPFN 1.5.1) | Dataset | Posizione | Elo (IC 95%) | Train / predict (s per 1.000 righe) | CatBoost default |
+|---|---:|---:|---:|---:|---:|
+| **Tutti i task, tutti gli split** | 51 | **31° su 99** | **1447 (+53 / -61)** | 0,23 / 0,019 | 43°, 1383 |
+| Tutti i task, Lite (primo split) | 51 | 30° su 99 | 1433 (+54 / -58) | 0,24 / 0,019 | 45°, 1358 |
+| **Classificazione, tutti gli split** | 38 | **28° su 103** | **1468 (+63 / -62)** | 0,24 / 0,019 | 41°, 1388 |
+| Binaria, tutti gli split | 30 | 29° su 103 | 1451 (+67 / -62) | 0,19 / 0,014 | 36°, 1408 |
+| Multiclasse, tutti gli split | 8 | 25° su 103 | 1559 (+146 / -98) | 0,37 / 0,024 | 59°, 1326 |
+| **Regressione, tutti gli split** | 13 | **47° su 101** | **1431 (+129 / -99)** | 0,16 / 0,024 | 51°, 1410 |
+| Tutti i task, dataset piccoli | | 27° su 99 | 1462 (+73 / -60) | 0,29 / 0,024 | 49°, 1323 |
+| Tutti i task, dataset medi | | 49° su 99 | 1446 (+116 / -116) | 0,08 / 0,015 | 32°, 1584 |
+
+L'Elo è calcolato tra i metodi di ciascuna vista, quindi i valori non sono confrontabili tra righe diverse. Con i
+modelli imputati inclusi (la vista di default della pagina) LightPFN 1.5.1 è 31° su 110 con Elo 1426 (+49 / -55).
+
+![Elo con intervalli al 95% per una selezione di metodi sui 51 dataset, LightPFN 1.5.1 in blu](../assets/tabarena_elo_15.png)
+
+Metodi selezionati, tutti i task, tutti gli split. I tempi sono le mediane di TabArena in secondi per 1.000
+righe; le voci ottimizzate includono il tempo di ricerca.
+
+| Posizione | Metodo | Elo | IC 95% | Train | Predict |
+|---:|---|---:|---:|---:|---:|
+| 1 | Kumo-Tabular (default) | 2024 | +159 / -106 | 2,39 | 0,253 |
+| 2 | LimiX-2 (default) | 2001 | +141 / -90 | 30,94 | 9,028 |
+| 7 | TabPFN-3.5 (default) | 1903 | +104 / -67 | 1,84 | 0,473 |
+| 8 | Seldon-Mini (default) | 1846 | +88 / -69 | 0,56 | 0,036 |
+| 9 | Kumo-Tabular-Small (default) | 1826 | +80 / -58 | 0,80 | 0,092 |
+| 20 | TabICLv2 (default) | 1592 | +60 / -54 | 0,75 | 0,139 |
+| 23 | TabDPT-1.3 (default) | 1547 | +61 / -42 | 0,57 | 0,176 |
+| 26 | RealMLP (tuned + ensembled) | 1506 | +42 / -42 | 2950,72 | 11,975 |
+| 30 | TabM (tuned + ensembled) | 1451 | +43 / -37 | 2450,13 | 2,247 |
+| **31** | **LightPFN 1.5.1 (default)** | **1447** | **+53 / -61** | **0,23** | **0,019** |
+| 33 | LightGBM (tuned + ensembled) | 1434 | +28 / -29 | 417,05 | 2,639 |
+| 35 | CatBoost (tuned + ensembled) | 1424 | +31 / -35 | 1346,21 | 0,344 |
+| 36 | CatBoost (tuned) | 1412 | +31 / -33 | 1346,21 | 0,038 |
+| 43 | CatBoost (default) | 1383 | +42 / -38 | 5,88 | 0,025 |
+| 44 | XGBoost (tuned + ensembled) | 1378 | +28 / -31 | 693,49 | 1,689 |
+| 68 | XGBoost (default) | 1214 | +33 / -39 | 1,94 | 0,123 |
+| 75 | LightGBM (default) | 1189 | +37 / -35 | 1,96 | 0,142 |
+| 92 | RandomForest (default) | 1000 | +48 / -59 | 0,43 | 0,054 |
+
+Sui 51 dataset e in classificazione la stima puntuale dell'Elo di LightPFN 1.5.1 è sopra tutti i metodi ad
+alberi, anche quelli ottimizzati e in ensemble. Il suo intervallo si sovrappone a quelli delle voci di gradient
+boosting ottimizzate e di CatBoost default, quindi rispetto a loro non è una vittoria netta; XGBoost e LightGBM
+default sono più di 200 punti sotto, con intervalli separati. In regressione, il primo supporto di LightPFN in
+classifica, è sopra CatBoost default (1410) con intervalli sovrapposti e sotto le voci di gradient boosting
+ottimizzate (da 1442 a 1522); i modelli fondazionali più grandi sono molto avanti (Kumo-Tabular-Small 2130,
+Seldon-Mini 2150, TabICLv2 1712). Come per la 1.1, il punto debole sono i dataset medi (49° su 99, dove
+CatBoost default è 32°).
+
+![Elo rispetto al tempo mediano di addestramento per 99 metodi sui 51 dataset, LightPFN 1.5.1 sul fronte di Pareto](../assets/tabarena_pareto_15.png)
+
+LightPFN 1.5.1 è sul fronte di Pareto tra Elo e tempo di addestramento in tutte le viste della tabella sopra, e
+tra Elo e tempo di predizione in tutte tranne i dataset medi: su tutti i task solo KNN si addestra più in fretta
+e solo EBM predice più in fretta, entrambi con un Elo molto più basso. In regressione il suo tempo di
+addestramento è il più basso di tutte le 101 voci. TabArena ha misurato LightPFN su GPU e i metodi ad alberi su
+CPU, quindi l'asse dei tempi confronta le configurazioni come sono state eseguite, non gli algoritmi a parità di
+hardware. Sullo stesso hardware i maintainer hanno misurato la 1.5.0 a 0,290 s in train e 0,019 s in predict per
+1.000 righe su tutti i task, e la 1.5.1 a 0,235 e 0,019, con lo stesso Elo.
+
+[CSV di tutti i task](../assets/tabarena_15_all_tasks.csv), [CSV della classificazione](../assets/tabarena_15_classification.csv),
+[CSV della regressione](../assets/tabarena_15_regression.csv) (tutti gli split, modelli imputati esclusi, come
+pubblicati da TabArena).
+
 ## Risultati della 1.5 (valutazioni locali)
 
 <a id="risultati-della-20"></a>
 
-Risultati locali raccolti al 9 novembre 2026, non classifica ufficiale. Le sezioni successive sono storiche e
-riguardano LightPFN 1.1.
+Risultati locali raccolti al 9 novembre 2026, prima dell'esecuzione ufficiale riportata sopra. Le sezioni
+successive sono storiche e riguardano LightPFN 1.1.
 
 | Misura (1.5, locale) | Risultato | Protocollo e limite |
 |---|---|---|
@@ -42,9 +114,8 @@ riguardano LightPFN 1.1.
 | Task categorici ad alta cardinalità (Dcat) | AUC 0,7075 a 10k righe, 0,7134 a 25k (1.1.0: 0,7047 / 0,7098; CatBoost default: 0,7031 / 0,7118) | 6 dataset con colonne categoriche ad alta cardinalità, un membro, locale |
 | Tabelle grandi (D4) | AUC 0,8200 (1.1.0: 0,8188; CatBoost default: 0,8189) | 46 celle, un membro, locale |
 
-Scalando i tempi ufficiali della 1.1.0 con questi rapporti di velocità si ottiene circa 0,14 s in train e circa
-0,014 s in predict per 1.000 righe: è un'estrapolazione tra hardware diversi, non una misura ufficiale della
-1.5. La soglia fp16 del pacchetto è ora 2.048 celle di contesto per membro. Il default finale di
+Questi rapporti di velocità locali non si trasferiscono alle mediane ufficiali (sopra): il protocollo di
+TabArena include il salvataggio dei modelli di fold e un refit, e le tabelle piccole dominano le mediane. La soglia fp16 del pacchetto è ora 2.048 celle di contesto per membro. Il default finale di
 `LightPFNRegressor` applica `log(y)` solo con target positivi e asimmetria campionaria corretta almeno 2
 (`log_skew=2.0`), altrimenti `-y` (`"flip"`). Questa regola è stata scelta sui set di sviluppo ed è usata
 nella Lite finale riportata sopra. I precedenti wrapper avevano Elo di regressione 1315 e 1351 contro uno
@@ -62,22 +133,6 @@ su CPU fp32. CatBoost default ha RMSE 0,4794 e 0,3689 nei rispettivi protocolli;
 (8/13 vittorie), mentre Kumo-Tabular-Small e TabICLv2, più grandi, battono LightPFN su ogni task.
 I quantili degli alberi su D3-reg usano la calibrazione dei residui su dati separati; D3-reg-L usa fit
 puntuali e Lite il bagging TabArena. I protocolli e le aggregazioni dei benchmark sono diversi.
-
-### Run dei maintainer di TabArena sulla 1.5.0
-
-I maintainer di TabArena hanno eseguito lightpfn 1.5.0 su tutti gli 816 split di TabArena-v0.1 (configurazione
-di default, bagging ufficiale a 8 fold con refit, RTX PRO 6000, torch 2.14.1) e hanno riportato il risultato nella
-[PR #719](https://github.com/autogluon/tabarena/pull/719); la voce non è ancora nella classifica pubblica.
-
-| Sottoinsieme | Posizione | Elo (IC 95%) | Voce ospitata di LightPFN 1.0 |
-|---|---:|---:|---:|
-| Tutti i task | 36 / 117 | 1426 (+49 / -56) | 1329, 59° (25,5% imputato) |
-| Binari | 35 / 115 | 1443 (+66 / -63) | 1415, 40° |
-| Multiclasse | 29 / 115 | 1550 (+126 / -88) | 1541, 31° |
-| Regressione | 53 / 112 | 1417 (+122 / -97) | non supportata |
-
-Tempo mediano di addestramento e di inferenza per 1.000 righe: 0,29 s e 0,019 s. LightPFN 1.5 è su entrambi i
-fronti di Pareto della classifica completa e sul fronte della regressione di Elo contro tempo di inferenza.
 
 ### Velocità di inferenza della 1.5.1
 
@@ -167,7 +222,8 @@ vantaggio su CatBoost vale sia sui dataset binari (+0,80) sia sui multiclasse (+
 
 ## TabArena, classifica ufficiale
 
-Classifica dell'11 ottobre 2026 ([Space di TabArena](https://huggingface.co/spaces/TabArena/leaderboard), commit
+Voce di LightPFN 1.1, sostituita da LightPFN 1.5.1 l'11 novembre 2026 (vedi
+[sopra](#tabarena-classifica-ufficiale-della-151)). Classifica dell'11 ottobre 2026 ([Space di TabArena](https://huggingface.co/spaces/TabArena/leaderboard), commit
 dei dati `0aac376`). I maintainer di TabArena hanno eseguito **LightPFN 1.1** sui 38 dataset di classificazione
 con il protocollo ufficiale (bagging a otto fold, validazione `8x1`) nella configurazione di default: quattro
 estimatori, un checkpoint, nessuno spazio di ricerca. Hanno marcato il risultato come verificato; nessuno dei

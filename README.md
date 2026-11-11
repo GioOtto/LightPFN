@@ -27,7 +27,8 @@ forward pass. Nothing is trained on your data and there are no hyperparameters t
 - **Small:** 4.61M parameters for the classifier (2 to 10 classes), 4.77M for the regressor (mean and 999
   quantiles), about 19 MB of weights each. Designed to run on a laptop CPU as well as on a GPU.
 - **Accurate without tuning:** on the official [TabArena](https://huggingface.co/spaces/TabArena/leaderboard)
-  leaderboard, LightPFN 1.1 ranks above every tree-based method in classification, tuned ones included.
+  leaderboard (11 November 2026), LightPFN 1.5 ranks above every tree-based method over all 51 datasets and in
+  classification, tuned and ensembled ones included, and is on the Pareto fronts of Elo against train and inference time.
 - **Fast:** fp16 inference on CUDA/ROCm, and a Vulkan backend for AMD, Intel and NVIDIA GPUs without CUDA or ROCm.
 - **Open:** code, weights and the training pipeline under Apache 2.0. Trained from scratch on synthetic data only,
   with no distillation and no weights or outputs of other tabular foundation models.
@@ -82,8 +83,9 @@ any non-finite block in fp32; `precision="fp32"` forces float32. CPU and Vulkan 
 
 | Benchmark | LightPFN |
 |---|---|
-| TabArena official leaderboard, 38 classification datasets (1.1, 11 October 2026) | 21st of 92, Elo 1441 (+69 / -79), above every tree-based method |
-| TabArena maintainer run of 1.5.0, all 816 splits ([PR #719](https://github.com/autogluon/tabarena/pull/719)) | 36th of 117 overall (Elo 1426), 29th in multiclass, 53rd of 112 in regression; on the Pareto fronts of Elo against train and inference time |
+| TabArena official leaderboard, all 51 datasets (1.5.1, 11 November 2026) | 31st of 99, Elo 1447 (+53 / -61), above every tree-based method; only KNN trains faster, only EBM predicts faster |
+| TabArena official leaderboard, 38 classification datasets | 28th of 103, Elo 1468 (+63 / -62), above every tree-based method |
+| TabArena official leaderboard, 13 regression datasets | 47th of 101, Elo 1431 (+129 / -99), above default CatBoost (1410), below tuned gradient boosting; fastest training of all entries |
 | 55 OpenML-CC18 classification datasets outside TabArena (1.5, one member) | mean AUC 0.910 (default CatBoost 0.902) |
 | 23 OpenML regression datasets outside TabArena (1.5) | lower RMSE than default CatBoost on 22 of 23 |
 | GPU speed, TabArena protocol (8-fold bagging and refit), 31 classification tasks (1.5.1 vs 1.1.0, same RTX 5090) | 1.65x faster training, 1.64x faster prediction (geometric means) |

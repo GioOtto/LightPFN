@@ -26,8 +26,9 @@ rispondono in un solo passaggio in avanti. Nessun addestramento sui tuoi dati e 
 
 - **Piccolo:** 4,61 milioni di parametri per il classificatore (da 2 a 10 classi), 4,77 per il regressore (media
   e 999 quantili), circa 19 MB di pesi ciascuno. Pensato per girare sulla CPU di un portatile come su una GPU.
-- **Accurato senza tuning:** nella classifica ufficiale di [TabArena](https://huggingface.co/spaces/TabArena/leaderboard),
-  LightPFN 1.1 è sopra tutti i metodi ad alberi in classificazione, anche quelli ottimizzati.
+- **Accurato senza tuning:** nella classifica ufficiale di [TabArena](https://huggingface.co/spaces/TabArena/leaderboard)
+  (11 novembre 2026), LightPFN 1.5 è sopra tutti i metodi ad alberi sui 51 dataset e in classificazione, anche
+  quelli ottimizzati e in ensemble, e sta sui fronti di Pareto di Elo contro tempo di addestramento e di inferenza.
 - **Veloce:** inferenza fp16 su CUDA/ROCm e un backend Vulkan per GPU AMD, Intel e NVIDIA senza CUDA né ROCm.
 - **Aperto:** codice, pesi e pipeline di addestramento sotto Apache 2.0. Addestrato da zero solo su dati
   sintetici, senza distillazione e senza pesi o output di altri modelli fondazionali tabellari.
@@ -80,8 +81,9 @@ in silenzio in fp32 ogni blocco non finito; `precision="fp32"` forza float32. CP
 
 | Benchmark | LightPFN |
 |---|---|
-| Classifica ufficiale TabArena, 38 dataset di classificazione (1.1, 11 ottobre 2026) | 21° su 92, Elo 1441 (+69 / -79), sopra tutti i metodi ad alberi |
-| Run dei maintainer di TabArena sulla 1.5.0, tutti gli 816 split ([PR #719](https://github.com/autogluon/tabarena/pull/719)) | 36° su 117 in totale (Elo 1426), 29° in multiclasse, 53° su 112 in regressione; sui fronti di Pareto di Elo contro tempo di addestramento e di inferenza |
+| Classifica ufficiale TabArena, tutti i 51 dataset (1.5.1, 11 novembre 2026) | 31° su 99, Elo 1447 (+53 / -61), sopra tutti i metodi ad alberi; solo KNN si addestra più in fretta, solo EBM predice più in fretta |
+| Classifica ufficiale TabArena, 38 dataset di classificazione | 28° su 103, Elo 1468 (+63 / -62), sopra tutti i metodi ad alberi |
+| Classifica ufficiale TabArena, 13 dataset di regressione | 47° su 101, Elo 1431 (+129 / -99), sopra CatBoost default (1410), sotto il gradient boosting ottimizzato; addestramento più veloce di tutte le voci |
 | 55 dataset di classificazione OpenML-CC18 fuori da TabArena (1.5, un membro) | AUC media 0,910 (CatBoost default 0,902) |
 | 23 dataset di regressione OpenML fuori da TabArena (1.5) | RMSE più basso di CatBoost default su 22 su 23 |
 | Velocità su GPU, protocollo TabArena (bagging a 8 fold e refit), 31 task di classificazione (1.5.1 contro 1.1.0, stessa RTX 5090) | addestramento 1,65 volte e predizione 1,64 volte più veloci (medie geometriche) |
