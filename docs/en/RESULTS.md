@@ -91,8 +91,10 @@ through the TabArena wrapper, default configuration, two repeats (median). Geome
 | 1.5.1 against 1.5.0 with the fixes, classification, RX 7900 XT (ROCm) | 17 | 1.17x | 1.03x | 1.20x / 1.04x (14 tasks) |
 | 1.5.1 against 1.5.0 with the fixes, regression, RX 7900 XT (ROCm) | 8 | 1.30x | 1.02x | 1.42x / 1.01x (5 tasks) |
 
-The refit predictions are bit-identical to 1.5.0 on every timed task. The out-of-fold predictions of the
-one-pass path differ by fp16 rounding: largest probability difference 8.3e-3, argmax agreement at least 99.8%,
+"1.5.0 with the fixes" is 1.5.0 plus the correctness fixes of 1.5.1 (same speed as 1.5.0); its fp16
+predictions differ from 1.5.0 only by the rounding of the 2D GEMM fix. Against it, the refit predictions of 1.5.1
+are bit-identical on every timed task, and the out-of-fold predictions of the one-pass path differ by fp16
+rounding: largest probability difference 8.3e-3, argmax agreement at least 99.8%,
 mean AUC change +5e-7 over the 31 classification tasks; out-of-fold RMSE changes below 0.02% in regression.
 
 ### Final second-member rule: CPU fp32 check

@@ -5,8 +5,9 @@ All notable changes to this project are listed here. Versions follow [semantic v
 ## 1.5.1 (2026-11-11)
 
 Inference fixes and faster GPU inference, with the same weights, architecture and Hugging Face revision as 1.5.0.
-Cached predictions are unchanged (bit-identical on the 31 TabArena classification and 8 regression tasks we
-timed); one-pass predictions match up to float rounding.
+In fp32, predictions are bit-identical to 1.5.0. In fp16 the 2D GEMM fix below changes the rounding (largest
+probability difference 6.4e-4 over 60 folds of 12 OpenML tasks, identical argmax); the speedups below keep cached
+predictions bit-identical, and one-pass predictions match the two-step path up to float rounding.
 
 - One-pass inference for `cache_context=False` on CUDA/ROCm: when the training and test rows fit in one piece,
   the context is encoded and the test rows predicted in a single pass that shares every row-wise operation

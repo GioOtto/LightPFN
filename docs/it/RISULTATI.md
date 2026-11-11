@@ -94,8 +94,10 @@ cache (fit, predizione out-of-fold, salvataggio) e un refit in cache sulle righe
 | 1.5.1 contro 1.5.0 con le correzioni, classificazione, RX 7900 XT (ROCm) | 17 | 1,17x | 1,03x | 1,20x / 1,04x (14 task) |
 | 1.5.1 contro 1.5.0 con le correzioni, regressione, RX 7900 XT (ROCm) | 8 | 1,30x | 1,02x | 1,42x / 1,01x (5 task) |
 
-Le predizioni del refit sono bit-identiche alla 1.5.0 su tutti i task misurati. Le predizioni out-of-fold del
-passaggio unico differiscono per arrotondamento fp16: differenza massima di probabilità 8,3e-3, accordo
+"1.5.0 con le correzioni" è la 1.5.0 più le correzioni di correttezza della 1.5.1 (stessa velocità della 1.5.0);
+le sue predizioni fp16 differiscono dalla 1.5.0 solo per l'arrotondamento della correzione GEMM 2D. Rispetto a
+essa, le predizioni del refit della 1.5.1 sono bit-identiche su tutti i task misurati e le predizioni out-of-fold
+del passaggio unico differiscono per arrotondamento fp16: differenza massima di probabilità 8,3e-3, accordo
 dell'argmax almeno 99,8%, variazione media dell'AUC +5e-7 sui 31 task di classificazione; variazioni dell'RMSE
 out-of-fold sotto lo 0,02% in regressione.
 
