@@ -6,6 +6,7 @@
 
   <p>
     <a href="https://pypi.org/project/LightPFN/"><img alt="PyPI" src="https://img.shields.io/pypi/v/lightpfn?style=for-the-badge&color=111111&label=PyPI" /></a>
+    <a href="https://pypi.org/project/LightPFN/"><img alt="Download totali da PyPI" src="https://img.shields.io/pepy/dt/lightpfn?style=for-the-badge&label=downloads&labelColor=111111&color=brightgreen" /></a>
     <a href="https://huggingface.co/ueuegio/LightPFN"><img alt="Pesi su Hugging Face" src="https://img.shields.io/badge/Pesi-Hugging%20Face-111111?style=for-the-badge&logo=huggingface&logoColor=white" /></a>
     <a href="https://github.com/GioOtto/LightPFN/blob/main/paper/LightPFN15_report.pdf"><img alt="Report tecnico 1.5 (PDF, in inglese)" src="https://img.shields.io/badge/Report%201.5-PDF-8B1A1A?style=for-the-badge&logo=adobeacrobatreader&logoColor=white" /></a>
   </p>
